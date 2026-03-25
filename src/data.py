@@ -1,0 +1,76 @@
+import pandas as pd
+from sqlalchemy import create_engine, text
+from config import Config
+
+def get_engine(cfg: Config):
+    return create_engine(cfg.db_url)
+
+def load_training_frame(cfg: Config) -> pd.DataFrame:
+    sql = text("""
+    select
+        f.*,
+        l.win_flag,
+        l.bt_place_flag,
+        l.graded_win_flag,
+        l.positive_prize_flag,
+        l.pog_total_prize,
+        l.label_complete
+    from pog.mv_static_features f
+    join pog.mv_horse_labels l
+      on f.ketto_num = l.ketto_num
+    where f.birth_year between :train_start and :test_end
+      and l.label_complete = true
+      and f.is_jra_registered = true
+    """)
+    engine = get_engine(cfg)
+    with engine.connect() as conn:
+        df = pd.read_sql(
+            sql,
+            conn,
+            params={
+                "train_start": cfg.train_birth_year_start,
+                "test_end": cfg.test_birth_year_end,
+            },
+        )
+    return df
+
+def load_scoring_frame(cfg: Config) -> pd.DataFrame:
+    sql = text("""
+    select *
+    from pog.mv_static_features
+    where birth_year = :target_birth_year
+      and is_jra_registered = true
+    """)
+    engine = get_engine(cfg)
+    with engine.connect() as conn:
+        df = pd.read_sql(sql, conn, params={"target_birth_year": cfg.target_birth_year})
+    return df
+
+def load_dynamic_features(cfg: Config, birth_year: int) -> pd.DataFrame:
+    sql = text("""
+    select *
+    from pog.fn_dynamic_features(:birth_year, :asof_date)
+    """)
+    engine = get_engine(cfg)
+    with engine.connect() as conn:
+        df = pd.read_sql(
+            sql,
+            conn,
+            params={
+                "birth_year": birth_year,
+                "asof_date": cfg.asof_date,
+            },
+        )
+    return df
+
+def save_predictions(cfg: Config, pred_df: pd.DataFrame):
+    engine = get_engine(cfg)
+    pred_df.to_sql(
+        "model_predictions",
+        engine,
+        schema="pog",
+        if_exists="append",
+        index=False,
+        method="multi",
+        chunksize=1000,
+    )

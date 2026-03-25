@@ -1,0 +1,17 @@
+[project]
+name = "pog-model"
+version = "0.1.0"
+description = "A ML model for discovering POG game candidates."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "catboost>=1.2.10",
+    "dotenv>=0.9.9",
+    "joblib>=1.5.3",
+    "numpy>=2.4.3",
+    "pandas>=3.0.1",
+    "psycopg2-binary>=2.9.11",
+    "pyyaml>=6.0.3",
+    "scikit-learn>=1.8.0",
+    "sqlalchemy>=2.0.48",
+]
