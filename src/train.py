@@ -187,6 +187,46 @@ def train_positive_regressor(train_df, valid_df, use_dynamic=False):
     return model
 
 
+def train_quantile_regressor(
+    train_df, valid_df, alpha=0.9, use_dynamic=False,
+    depth=4, l2_leaf_reg=15.0, learning_rate=0.02, iterations=2000,
+):
+    """Train a quantile regression on log1p(prize) for positive-prize samples."""
+    train_pos = train_df[train_df["pog_total_prize"] > 0].copy()
+    valid_pos = valid_df[valid_df["pog_total_prize"] > 0].copy()
+
+    if len(train_pos) == 0:
+        raise ValueError(f"Quantile({alpha}): train_pos 为空")
+    if len(valid_pos) == 0:
+        raise ValueError(f"Quantile({alpha}): valid_pos 为空")
+
+    train_pos = add_log_target(train_pos)
+    valid_pos = add_log_target(valid_pos)
+
+    X_train, _, _, cat_cols = prepare_matrix(train_pos, use_dynamic=use_dynamic)
+    X_valid, _, _, _ = prepare_matrix(valid_pos, use_dynamic=use_dynamic)
+
+    model = CatBoostRegressor(
+        loss_function=f"Quantile:alpha={alpha}",
+        eval_metric=f"Quantile:alpha={alpha}",
+        iterations=iterations,
+        learning_rate=learning_rate,
+        depth=depth,
+        l2_leaf_reg=l2_leaf_reg,
+        random_seed=42,
+        verbose=100,
+        od_type="Iter",
+        od_wait=100,
+    )
+
+    model.fit(
+        build_pool(X_train, train_pos["log_pog_total_prize"], cat_cols),
+        eval_set=build_pool(X_valid, valid_pos["log_pog_total_prize"], cat_cols),
+        use_best_model=True,
+    )
+    return model
+
+
 def predict_binary(model, df, target, use_dynamic=False):
     X, _, _, _ = prepare_matrix(df, use_dynamic=use_dynamic)
     prob = model.predict_proba(X)[:, 1]
@@ -255,7 +295,7 @@ def build_blended_scores(df: pd.DataFrame) -> pd.DataFrame:
     out["r_p_bt_win"] = rank_to_unit_interval(out["p_bt_win"])
     out["r_p_graded_win"] = rank_to_unit_interval(out["p_graded_win"])
 
-    # 偏稳健：兼顾均值与层级里程碑
+    # 偏稳健：兼顾均值与层级里程碑（保持不变）
     out["score_balanced"] = (
         0.45 * out["r_expected_pog_prize"] +
         0.20 * out["r_p_bt_place"] +
@@ -263,14 +303,35 @@ def build_blended_scores(df: pd.DataFrame) -> pd.DataFrame:
         0.15 * out["r_p_graded_win"]
     )
 
-    # 偏上限：更看重高层级爆发
-    out["score_ceiling"] = (
+    # --- 旧版 ceiling（保留供对比） ---
+    out["score_ceiling_old"] = (
         0.25 * out["r_expected_pog_prize"] +
         0.15 * out["r_p_win"] +
         0.20 * out["r_p_bt_place"] +
         0.20 * out["r_p_bt_win"] +
         0.20 * out["r_p_graded_win"]
     )
+
+    # --- 新版 ceiling：以 ceiling 专用信号为核心 ---
+    has_ceiling = all(
+        c in out.columns
+        for c in ["p_prize_ge_10m", "p_prize_ge_30m", "q90_prize"]
+    )
+    if has_ceiling:
+        out["r_p_prize_ge_10m"] = rank_to_unit_interval(out["p_prize_ge_10m"])
+        out["r_p_prize_ge_30m"] = rank_to_unit_interval(out["p_prize_ge_30m"])
+        out["r_q90_prize"] = rank_to_unit_interval(out["q90_prize"])
+
+        out["score_ceiling"] = (
+            0.30 * out["r_p_prize_ge_10m"] +
+            0.25 * out["r_p_prize_ge_30m"] +
+            0.20 * out["r_p_graded_win"] +
+            0.15 * out["r_q90_prize"] +
+            0.10 * out["r_expected_pog_prize"]
+        )
+    else:
+        # fallback：如果 ceiling 列不存在就使用旧版
+        out["score_ceiling"] = out["score_ceiling_old"]
 
     return out
 
@@ -393,6 +454,8 @@ def main():
         "graded_win_flag",
         "positive_prize_flag",
         "pog_total_prize",
+        "pog_total_prize_ge_10m_flag",
+        "pog_total_prize_ge_30m_flag",
     ]
     missing_cols = [c for c in required_cols if c not in df.columns]
     if missing_cols:
@@ -494,6 +557,64 @@ def main():
     )
 
     # -------------------------
+    # Ceiling models
+    # -------------------------
+    print("\n=== TRAIN CEILING MODELS ===")
+
+    prize_ge_10m_model = train_binary_stage_model(
+        train_df=train_df,
+        valid_df=valid_df,
+        target="pog_total_prize_ge_10m_flag",
+        condition_col=None,
+        use_dynamic=cfg.use_dynamic_features,
+        depth=5,
+        l2_leaf_reg=10.0,
+        learning_rate=0.03,
+        iterations=1200,
+        auto_class_weights="Balanced",
+    )
+
+    prize_ge_30m_model = train_binary_stage_model(
+        train_df=train_df,
+        valid_df=valid_df,
+        target="pog_total_prize_ge_30m_flag",
+        condition_col=None,
+        use_dynamic=cfg.use_dynamic_features,
+        depth=4,
+        l2_leaf_reg=15.0,
+        learning_rate=0.02,
+        iterations=1500,
+        auto_class_weights="Balanced",
+    )
+
+    # -------------------------
+    # Quantile regressors (upper tail)
+    # -------------------------
+    print("\n=== TRAIN QUANTILE REGRESSORS ===")
+
+    q80_model = train_quantile_regressor(
+        train_df=train_df,
+        valid_df=valid_df,
+        alpha=0.8,
+        use_dynamic=cfg.use_dynamic_features,
+        depth=4,
+        l2_leaf_reg=15.0,
+        learning_rate=0.02,
+        iterations=2000,
+    )
+
+    q90_model = train_quantile_regressor(
+        train_df=train_df,
+        valid_df=valid_df,
+        alpha=0.9,
+        use_dynamic=cfg.use_dynamic_features,
+        depth=4,
+        l2_leaf_reg=15.0,
+        learning_rate=0.02,
+        iterations=2000,
+    )
+
+    # -------------------------
     # Save models
     # -------------------------
     joblib.dump(win_model, "models/win_model.joblib")
@@ -502,6 +623,10 @@ def main():
     joblib.dump(graded_given_bt_win_model, "models/graded_given_bt_win_model.joblib")
     joblib.dump(positive_prize_model, "models/positive_prize_model.joblib")
     joblib.dump(prize_model, "models/prize_model.joblib")
+    joblib.dump(prize_ge_10m_model, "models/prize_ge_10m_model.joblib")
+    joblib.dump(prize_ge_30m_model, "models/prize_ge_30m_model.joblib")
+    joblib.dump(q80_model, "models/q80_model.joblib")
+    joblib.dump(q90_model, "models/q90_model.joblib")
 
     with open("models/model_bundle_meta.json", "w", encoding="utf-8") as f:
         json.dump(
@@ -509,6 +634,8 @@ def main():
                 "model_name": cfg.model_name,
                 "model_version": cfg.model_version,
                 "nested_chain": ["win_flag", "bt_place_flag", "bt_win_flag", "graded_win_flag"],
+                "ceiling_targets": ["pog_total_prize_ge_10m_flag", "pog_total_prize_ge_30m_flag"],
+                "quantile_targets": ["q80", "q90"],
                 "train_years": [cfg.train_birth_year_start, cfg.train_birth_year_end],
                 "valid_years": [cfg.valid_birth_year_start, cfg.valid_birth_year_end],
                 "test_years": [cfg.test_birth_year_start, cfg.test_birth_year_end],
@@ -537,6 +664,8 @@ def main():
             "bt_win_flag",
             "graded_win_flag",
             "positive_prize_flag",
+            "pog_total_prize_ge_10m_flag",
+            "pog_total_prize_ge_30m_flag",
         ]
         if c in test_df.columns
     ]
@@ -573,6 +702,24 @@ def main():
         test_pred["p_positive_prize"] * test_pred["pred_positive_prize_amount"]
     )
 
+    # Ceiling predictions
+    test_pred["p_prize_ge_10m"] = predict_binary(
+        prize_ge_10m_model, test_df,
+        "pog_total_prize_ge_10m_flag",
+        use_dynamic=cfg.use_dynamic_features,
+    )
+    test_pred["p_prize_ge_30m"] = predict_binary(
+        prize_ge_30m_model, test_df,
+        "pog_total_prize_ge_30m_flag",
+        use_dynamic=cfg.use_dynamic_features,
+    )
+
+    # Quantile predictions
+    test_pred["q80_log_prize"] = predict_regressor(q80_model, test_df, use_dynamic=cfg.use_dynamic_features)
+    test_pred["q90_log_prize"] = predict_regressor(q90_model, test_df, use_dynamic=cfg.use_dynamic_features)
+    test_pred["q80_prize"] = np.clip(np.expm1(test_pred["q80_log_prize"]), 0, None)
+    test_pred["q90_prize"] = np.clip(np.expm1(test_pred["q90_log_prize"]), 0, None)
+
     test_pred = build_blended_scores(test_pred)
 
     # -------------------------
@@ -590,6 +737,22 @@ def main():
             test_pred["positive_prize_flag"],
             test_pred["p_positive_prize"],
             "positive_prize"
+        )
+    )
+
+    # ceiling 模型评估
+    metrics.update(
+        evaluate_binary(
+            test_pred["pog_total_prize_ge_10m_flag"],
+            test_pred["p_prize_ge_10m"],
+            "prize_ge_10m"
+        )
+    )
+    metrics.update(
+        evaluate_binary(
+            test_pred["pog_total_prize_ge_30m_flag"],
+            test_pred["p_prize_ge_30m"],
+            "prize_ge_30m"
         )
     )
 
@@ -654,8 +817,12 @@ def main():
         "p_bt_place",
         "p_bt_win",
         "p_graded_win",
+        "p_prize_ge_10m",
+        "p_prize_ge_30m",
+        "q90_prize",
         "score_balanced",
         "score_ceiling",
+        "score_ceiling_old",
     ]
     ks = [20, 50, 100]
 
@@ -720,6 +887,22 @@ def main():
         current_pred["p_positive_prize"] * current_pred["pred_positive_prize_amount"]
     )
 
+    # Ceiling predictions for current cohort
+    current_pred["p_prize_ge_10m"] = predict_binary(
+        prize_ge_10m_model, score_df,
+        "pog_total_prize_ge_10m_flag",
+        use_dynamic=cfg.use_dynamic_features,
+    )
+    current_pred["p_prize_ge_30m"] = predict_binary(
+        prize_ge_30m_model, score_df,
+        "pog_total_prize_ge_30m_flag",
+        use_dynamic=cfg.use_dynamic_features,
+    )
+    current_pred["q80_log_prize"] = predict_regressor(q80_model, score_df, use_dynamic=cfg.use_dynamic_features)
+    current_pred["q90_log_prize"] = predict_regressor(q90_model, score_df, use_dynamic=cfg.use_dynamic_features)
+    current_pred["q80_prize"] = np.clip(np.expm1(current_pred["q80_log_prize"]), 0, None)
+    current_pred["q90_prize"] = np.clip(np.expm1(current_pred["q90_log_prize"]), 0, None)
+
     current_pred = build_blended_scores(current_pred)
 
     current_pred["model_name"] = cfg.model_name
@@ -766,9 +949,13 @@ def main():
             "p_bt_place",
             "p_bt_win",
             "p_graded_win",
+            "p_prize_ge_10m",
+            "p_prize_ge_30m",
+            "q90_prize",
             "expected_pog_prize",
             "score_balanced",
             "score_ceiling",
+            "score_ceiling_old",
         ]
         if c in current_pred.columns
     ]

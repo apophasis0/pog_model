@@ -9,6 +9,8 @@ TARGET_COLS = [
     "graded_win_flag",
     "positive_prize_flag",
     "pog_total_prize",
+    "pog_total_prize_ge_10m_flag",
+    "pog_total_prize_ge_30m_flag",
     "label_complete",
 ]
 
@@ -97,14 +99,15 @@ def prepare_matrix(df: pd.DataFrame, use_dynamic: bool = False):
     feature_cols = [c for c in cat_cols + num_cols if c in work.columns]
 
     X = work[feature_cols]
-    y = {
-        "win_flag": work["win_flag"].astype(int) if "win_flag" in work.columns else None,
-        "bt_place_flag": work["bt_place_flag"].astype(int) if "bt_place_flag" in work.columns else None,
-        "bt_win_flag": work["bt_win_flag"].astype(int) if "bt_win_flag" in work.columns else None,
-        "graded_win_flag": work["graded_win_flag"].astype(int) if "graded_win_flag" in work.columns else None,
-        "positive_prize_flag": work["positive_prize_flag"].astype(int) if "positive_prize_flag" in work.columns else None,
-        "pog_total_prize": work["pog_total_prize"].astype(float) if "pog_total_prize" in work.columns else None,
-    }
+    y = {}
+    for tc in TARGET_COLS:
+        if tc in work.columns:
+            if tc == "pog_total_prize":
+                y[tc] = work[tc].astype(float)
+            elif tc == "label_complete":
+                y[tc] = work[tc]
+            else:
+                y[tc] = work[tc].astype(int)
     return X, y, feature_cols, cat_cols
 
 def add_log_target(df: pd.DataFrame) -> pd.DataFrame:

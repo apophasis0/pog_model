@@ -27,6 +27,8 @@ def load_training_frame(cfg: Config) -> pd.DataFrame:
         l.graded_win_flag,
         l.positive_prize_flag,
         l.pog_total_prize,
+        l.pog_total_prize_ge_10m_flag,
+        l.pog_total_prize_ge_30m_flag,
         l.label_complete
     from pog.mv_static_features f
     join pog.mv_horse_labels l
