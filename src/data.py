@@ -49,6 +49,31 @@ def load_training_frame(cfg: Config) -> pd.DataFrame:
         )
     return df
 
+def load_all_labeled_frame(cfg: Config) -> pd.DataFrame:
+    """Load all label-complete JRA-registered horses (for rolling backtest)."""
+    sql = text("""
+    select
+        f.*,
+        l.win_flag,
+        l.bt_place_flag,
+        l.bt_win_flag,
+        l.graded_win_flag,
+        l.positive_prize_flag,
+        l.pog_total_prize,
+        l.pog_total_prize_ge_10m_flag,
+        l.pog_total_prize_ge_30m_flag,
+        l.label_complete
+    from pog.mv_static_features f
+    join pog.mv_horse_labels l
+      on f.ketto_num = l.ketto_num
+    where l.label_complete = true
+      and f.is_jra_registered = true
+    """)
+    engine = get_engine(cfg)
+    with engine.connect() as conn:
+        df = pd.read_sql(sql, conn)
+    return df
+
 def load_scoring_frame(cfg: Config) -> pd.DataFrame:
     sql = text("""
     select *
