@@ -5,6 +5,7 @@ ID_COLS = ["ketto_num"]
 TARGET_COLS = [
     "win_flag",
     "bt_place_flag",
+    "bt_win_flag",
     "graded_win_flag",
     "positive_prize_flag",
     "pog_total_prize",
@@ -99,6 +100,7 @@ def prepare_matrix(df: pd.DataFrame, use_dynamic: bool = False):
     y = {
         "win_flag": work["win_flag"].astype(int) if "win_flag" in work.columns else None,
         "bt_place_flag": work["bt_place_flag"].astype(int) if "bt_place_flag" in work.columns else None,
+        "bt_win_flag": work["bt_win_flag"].astype(int) if "bt_win_flag" in work.columns else None,
         "graded_win_flag": work["graded_win_flag"].astype(int) if "graded_win_flag" in work.columns else None,
         "positive_prize_flag": work["positive_prize_flag"].astype(int) if "positive_prize_flag" in work.columns else None,
         "pog_total_prize": work["pog_total_prize"].astype(float) if "pog_total_prize" in work.columns else None,

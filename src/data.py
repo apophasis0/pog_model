@@ -5,12 +5,25 @@ from config import Config
 def get_engine(cfg: Config):
     return create_engine(cfg.db_url)
 
+def load_completed_birth_years(cfg: Config):
+    sql = text("""
+    select distinct birth_year
+    from pog.mv_horse_labels
+    where label_complete = true
+    order by birth_year
+    """)
+    engine = get_engine(cfg)
+    with engine.connect() as conn:
+        df = pd.read_sql(sql, conn)
+    return df["birth_year"].astype(int).tolist()
+
 def load_training_frame(cfg: Config) -> pd.DataFrame:
     sql = text("""
     select
         f.*,
         l.win_flag,
         l.bt_place_flag,
+        l.bt_win_flag,
         l.graded_win_flag,
         l.positive_prize_flag,
         l.pog_total_prize,
@@ -69,7 +82,7 @@ def save_predictions(cfg: Config, pred_df: pd.DataFrame):
         "model_predictions",
         engine,
         schema="pog",
-        if_exists="append",
+        if_exists="replace",
         index=False,
         method="multi",
         chunksize=1000,
