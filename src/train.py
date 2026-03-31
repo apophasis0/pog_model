@@ -4,6 +4,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from catboost import CatBoostClassifier, CatBoostRegressor, Pool
+from sklearn.linear_model import LinearRegression
 from dotenv import load_dotenv
 
 from config import Config
@@ -286,7 +287,50 @@ def rank_to_unit_interval(s: pd.Series) -> pd.Series:
     return s.rank(method="average", pct=True)
 
 
-def build_blended_scores(df: pd.DataFrame) -> pd.DataFrame:
+def fit_ceiling_weights(df: pd.DataFrame) -> dict:
+    """
+    Fits a linear combination of rank features to target rank of pog_total_prize.
+    Returns the normalized learned weights for score_ceiling.
+    """
+    if "pog_total_prize" not in df.columns or len(df) == 0:
+        return {}
+    
+    # Require expected predictions to be present
+    required_cols = ["expected_pog_prize", "p_graded_win", "p_prize_ge_10m", "p_prize_ge_30m", "q90_prize"]
+    if not all(c in df.columns for c in required_cols):
+        return {}
+
+    temp = df.copy()
+    temp["r_expected_pog_prize"] = rank_to_unit_interval(temp["expected_pog_prize"])
+    temp["r_p_graded_win"] = rank_to_unit_interval(temp["p_graded_win"])
+    temp["r_p_prize_ge_10m"] = rank_to_unit_interval(temp["p_prize_ge_10m"])
+    temp["r_p_prize_ge_30m"] = rank_to_unit_interval(temp["p_prize_ge_30m"])
+    temp["r_q90_prize"] = rank_to_unit_interval(temp["q90_prize"])
+    
+    features = [
+        "r_p_prize_ge_10m",
+        "r_p_prize_ge_30m",
+        "r_p_graded_win",
+        "r_q90_prize",
+        "r_expected_pog_prize"
+    ]
+    
+    y = rank_to_unit_interval(temp["pog_total_prize"])
+    X = temp[features]
+    
+    reg = LinearRegression(positive=True, fit_intercept=False)
+    reg.fit(X, y)
+    
+    w = reg.coef_
+    if w.sum() > 0:
+        w = w / w.sum()
+    else:
+        w = np.array([0.30, 0.25, 0.20, 0.15, 0.10])
+        
+    return dict(zip(features, w))
+
+
+def build_blended_scores(df: pd.DataFrame, ceiling_weights: dict | None = None) -> pd.DataFrame:
     out = df.copy()
 
     out["r_expected_pog_prize"] = rank_to_unit_interval(out["expected_pog_prize"])
@@ -322,13 +366,18 @@ def build_blended_scores(df: pd.DataFrame) -> pd.DataFrame:
         out["r_p_prize_ge_30m"] = rank_to_unit_interval(out["p_prize_ge_30m"])
         out["r_q90_prize"] = rank_to_unit_interval(out["q90_prize"])
 
-        out["score_ceiling"] = (
-            0.30 * out["r_p_prize_ge_10m"] +
-            0.25 * out["r_p_prize_ge_30m"] +
-            0.20 * out["r_p_graded_win"] +
-            0.15 * out["r_q90_prize"] +
-            0.10 * out["r_expected_pog_prize"]
-        )
+        if ceiling_weights:
+            out["score_ceiling"] = 0.0
+            for feat, w in ceiling_weights.items():
+                out["score_ceiling"] += w * out[feat]
+        else:
+            out["score_ceiling"] = (
+                0.30 * out["r_p_prize_ge_10m"] +
+                0.25 * out["r_p_prize_ge_30m"] +
+                0.20 * out["r_p_graded_win"] +
+                0.15 * out["r_q90_prize"] +
+                0.10 * out["r_expected_pog_prize"]
+            )
     else:
         # fallback：如果 ceiling 列不存在就使用旧版
         out["score_ceiling"] = out["score_ceiling_old"]
@@ -615,6 +664,32 @@ def main():
     )
 
     # -------------------------
+    # Learn Ceiling Weights (from Validation set)
+    # -------------------------
+    print("\n=== LEARN CEILING WEIGHTS ===")
+    valid_pred = valid_df.copy()
+    valid_nested = predict_nested_milestones(
+        df=valid_df, win_model=win_model, bt_place_given_win_model=bt_place_given_win_model,
+        bt_win_given_bt_place_model=bt_win_given_bt_place_model, graded_given_bt_win_model=graded_given_bt_win_model,
+        use_dynamic=cfg.use_dynamic_features
+    )
+    for col in valid_nested.columns:
+        valid_pred[col] = valid_nested[col].values
+        
+    valid_pred["p_positive_prize"] = predict_binary(positive_prize_model, valid_df, "positive_prize_flag", use_dynamic=cfg.use_dynamic_features)
+    valid_pred["pred_log_prize_pos"] = predict_regressor(prize_model, valid_df, use_dynamic=cfg.use_dynamic_features)
+    valid_pred["pred_positive_prize_amount"] = np.clip(np.expm1(valid_pred["pred_log_prize_pos"]), 0, None)
+    valid_pred["expected_pog_prize"] = valid_pred["p_positive_prize"] * valid_pred["pred_positive_prize_amount"]
+    
+    valid_pred["p_prize_ge_10m"] = predict_binary(prize_ge_10m_model, valid_df, "pog_total_prize_ge_10m_flag", use_dynamic=cfg.use_dynamic_features)
+    valid_pred["p_prize_ge_30m"] = predict_binary(prize_ge_30m_model, valid_df, "pog_total_prize_ge_30m_flag", use_dynamic=cfg.use_dynamic_features)
+    valid_pred["q90_log_prize"] = predict_regressor(q90_model, valid_df, use_dynamic=cfg.use_dynamic_features)
+    valid_pred["q90_prize"] = np.clip(np.expm1(valid_pred["q90_log_prize"]), 0, None)
+    
+    ceiling_weights = fit_ceiling_weights(valid_pred)
+    print("Learned Ceiling Weights:", ceiling_weights)
+
+    # -------------------------
     # Save models
     # -------------------------
     joblib.dump(win_model, "models/win_model.joblib")
@@ -639,6 +714,7 @@ def main():
                 "train_years": [cfg.train_birth_year_start, cfg.train_birth_year_end],
                 "valid_years": [cfg.valid_birth_year_start, cfg.valid_birth_year_end],
                 "test_years": [cfg.test_birth_year_start, cfg.test_birth_year_end],
+                "ceiling_weights": ceiling_weights,
             },
             f,
             ensure_ascii=False,
@@ -720,7 +796,7 @@ def main():
     test_pred["q80_prize"] = np.clip(np.expm1(test_pred["q80_log_prize"]), 0, None)
     test_pred["q90_prize"] = np.clip(np.expm1(test_pred["q90_log_prize"]), 0, None)
 
-    test_pred = build_blended_scores(test_pred)
+    test_pred = build_blended_scores(test_pred, ceiling_weights=ceiling_weights)
 
     # -------------------------
     # Metrics

@@ -28,6 +28,7 @@ from train import (
     predict_nested_milestones,
     build_blended_scores,
     build_topk_report,
+    fit_ceiling_weights,
 )
 
 # ==============================
@@ -192,16 +193,16 @@ def run_single_fold(
     if bt_win_given_bt_place_model is not None:
         p_bt_win_given_bt_place = predict_binary(bt_win_given_bt_place_model, test_df, "bt_win_flag")
     else:
-        base_rate = train_df.loc[train_df["bt_place_flag"] == 1, "bt_win_flag"].mean()
-        p_bt_win_given_bt_place = np.full(len(test_df), base_rate)
-        print(f"  [fallback] p_bt_win_given_bt_place = {base_rate:.4f}")
+        base_rate_bt_win = train_df.loc[train_df["bt_place_flag"] == 1, "bt_win_flag"].mean()
+        p_bt_win_given_bt_place = np.full(len(test_df), base_rate_bt_win)
+        print(f"  [fallback] p_bt_win_given_bt_place = {base_rate_bt_win:.4f}")
 
     if graded_given_bt_win_model is not None:
         p_graded_given_bt_win = predict_binary(graded_given_bt_win_model, test_df, "graded_win_flag")
     else:
-        base_rate = train_df.loc[train_df["bt_win_flag"] == 1, "graded_win_flag"].mean()
-        p_graded_given_bt_win = np.full(len(test_df), base_rate)
-        print(f"  [fallback] p_graded_given_bt_win = {base_rate:.4f}")
+        base_rate_graded_win = train_df.loc[train_df["bt_win_flag"] == 1, "graded_win_flag"].mean()
+        p_graded_given_bt_win = np.full(len(test_df), base_rate_graded_win)
+        print(f"  [fallback] p_graded_given_bt_win = {base_rate_graded_win:.4f}")
 
     p_bt_place = p_win * p_bt_place_given_win
     p_bt_win = p_bt_place * p_bt_win_given_bt_place
@@ -232,7 +233,34 @@ def run_single_fold(
     test_pred["q90_prize"] = np.clip(np.expm1(test_pred["q90_log_prize"]), 0, None)
 
     # Blended scores
-    test_pred = build_blended_scores(test_pred)
+    valid_pred = valid_df.copy()
+    valid_pred["p_win"] = predict_binary(win_model, valid_df, "win_flag")
+    valid_pred["p_bt_place_given_win"] = predict_binary(bt_place_given_win_model, valid_df, "bt_place_flag")
+    if bt_win_given_bt_place_model is not None:
+        valid_pred["p_bt_win_given_bt_place"] = predict_binary(bt_win_given_bt_place_model, valid_df, "bt_win_flag")
+    else:
+        valid_pred["p_bt_win_given_bt_place"] = np.full(len(valid_df), base_rate_bt_win)
+    if graded_given_bt_win_model is not None:
+        valid_pred["p_graded_given_bt_win"] = predict_binary(graded_given_bt_win_model, valid_df, "graded_win_flag")
+    else:
+        valid_pred["p_graded_given_bt_win"] = np.full(len(valid_df), base_rate_graded_win)
+        
+    valid_pred["p_bt_place"] = valid_pred["p_win"] * valid_pred["p_bt_place_given_win"]
+    valid_pred["p_bt_win"] = valid_pred["p_bt_place"] * valid_pred["p_bt_win_given_bt_place"]
+    valid_pred["p_graded_win"] = valid_pred["p_bt_win"] * valid_pred["p_graded_given_bt_win"]
+
+    valid_pred["p_positive_prize"] = predict_binary(positive_prize_model, valid_df, "positive_prize_flag")
+    valid_pred["pred_log_prize_pos"] = predict_regressor(prize_model, valid_df)
+    valid_pred["pred_positive_prize_amount"] = np.clip(np.expm1(valid_pred["pred_log_prize_pos"]), 0, None)
+    valid_pred["expected_pog_prize"] = valid_pred["p_positive_prize"] * valid_pred["pred_positive_prize_amount"]
+    valid_pred["p_prize_ge_10m"] = predict_binary(prize_ge_10m_model, valid_df, "pog_total_prize_ge_10m_flag")
+    valid_pred["p_prize_ge_30m"] = predict_binary(prize_ge_30m_model, valid_df, "pog_total_prize_ge_30m_flag")
+    valid_pred["q90_log_prize"] = predict_regressor(q90_model, valid_df)
+    valid_pred["q90_prize"] = np.clip(np.expm1(valid_pred["q90_log_prize"]), 0, None)
+
+    ceiling_weights = fit_ceiling_weights(valid_pred)
+    
+    test_pred = build_blended_scores(test_pred, ceiling_weights=ceiling_weights)
 
     # --- Top-k report ---
     topk = build_topk_report(test_pred, score_cols=score_cols, ks=ks)
