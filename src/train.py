@@ -979,7 +979,7 @@ def main():
     current_pred["q80_prize"] = np.clip(np.expm1(current_pred["q80_log_prize"]), 0, None)
     current_pred["q90_prize"] = np.clip(np.expm1(current_pred["q90_log_prize"]), 0, None)
 
-    current_pred = build_blended_scores(current_pred)
+    current_pred = build_blended_scores(current_pred, ceiling_weights=ceiling_weights)
 
     current_pred["model_name"] = cfg.model_name
     current_pred["model_version"] = cfg.model_version
