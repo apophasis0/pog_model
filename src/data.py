@@ -2,8 +2,12 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 from config import Config
 
+STATIC_FEATURE_VIEW = "pog.mv_static_features_v2"
+
+
 def get_engine(cfg: Config):
     return create_engine(cfg.db_url)
+
 
 def load_completed_birth_years(cfg: Config):
     sql = text("""
@@ -17,8 +21,9 @@ def load_completed_birth_years(cfg: Config):
         df = pd.read_sql(sql, conn)
     return df["birth_year"].astype(int).tolist()
 
+
 def load_training_frame(cfg: Config) -> pd.DataFrame:
-    sql = text("""
+    sql = text(f"""
     select
         f.*,
         l.win_flag,
@@ -30,7 +35,7 @@ def load_training_frame(cfg: Config) -> pd.DataFrame:
         l.pog_total_prize_ge_10m_flag,
         l.pog_total_prize_ge_30m_flag,
         l.label_complete
-    from pog.mv_static_features f
+    from {STATIC_FEATURE_VIEW} f
     join pog.mv_horse_labels l
       on f.ketto_num = l.ketto_num
     where f.birth_year between :train_start and :test_end
@@ -49,9 +54,10 @@ def load_training_frame(cfg: Config) -> pd.DataFrame:
         )
     return df
 
+
 def load_all_labeled_frame(cfg: Config) -> pd.DataFrame:
     """Load all label-complete JRA-registered horses (for rolling backtest)."""
-    sql = text("""
+    sql = text(f"""
     select
         f.*,
         l.win_flag,
@@ -63,7 +69,7 @@ def load_all_labeled_frame(cfg: Config) -> pd.DataFrame:
         l.pog_total_prize_ge_10m_flag,
         l.pog_total_prize_ge_30m_flag,
         l.label_complete
-    from pog.mv_static_features f
+    from {STATIC_FEATURE_VIEW} f
     join pog.mv_horse_labels l
       on f.ketto_num = l.ketto_num
     where l.label_complete = true
@@ -74,10 +80,11 @@ def load_all_labeled_frame(cfg: Config) -> pd.DataFrame:
         df = pd.read_sql(sql, conn)
     return df
 
+
 def load_scoring_frame(cfg: Config) -> pd.DataFrame:
-    sql = text("""
+    sql = text(f"""
     select *
-    from pog.mv_static_features
+    from {STATIC_FEATURE_VIEW}
     where birth_year = :target_birth_year
       and is_jra_registered = true
     """)
@@ -85,6 +92,7 @@ def load_scoring_frame(cfg: Config) -> pd.DataFrame:
     with engine.connect() as conn:
         df = pd.read_sql(sql, conn, params={"target_birth_year": cfg.target_birth_year})
     return df
+
 
 def load_dynamic_features(cfg: Config, birth_year: int) -> pd.DataFrame:
     sql = text("""
@@ -102,6 +110,7 @@ def load_dynamic_features(cfg: Config, birth_year: int) -> pd.DataFrame:
             },
         )
     return df
+
 
 def save_predictions(cfg: Config, pred_df: pd.DataFrame):
     engine = get_engine(cfg)

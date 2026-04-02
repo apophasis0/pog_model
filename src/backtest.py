@@ -9,7 +9,6 @@ Usage:
 """
 import os
 import sys
-import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 
@@ -17,19 +16,10 @@ load_dotenv()
 
 from config import Config
 from data import load_all_labeled_frame, load_completed_birth_years
-from train import (
-    split_by_birth_year,
-    describe_split,
-    train_binary_stage_model,
-    train_positive_regressor,
-    train_quantile_regressor,
-    predict_binary,
-    predict_regressor,
-    predict_nested_milestones,
-    build_blended_scores,
-    build_topk_report,
-    fit_ceiling_weights,
-)
+from features import FeatureSet
+from train import describe_split
+from pipeline import train_and_evaluate
+
 
 # ==============================
 # Rolling fold definition
@@ -48,7 +38,6 @@ def generate_folds(
     folds = []
     start = completed_years[0]
 
-    # Build from most recent backward
     for i in range(len(completed_years) - 2, 0, -1):
         test_year = completed_years[i + 1] if i + 1 < len(completed_years) else None
         if test_year is None:
@@ -80,9 +69,9 @@ def generate_folds(
 def run_single_fold(
     df: pd.DataFrame,
     fold: dict,
+    feature_set: FeatureSet,
     score_cols: list[str],
     ks: list[int],
-    verbose: int = 0,
 ) -> tuple[pd.DataFrame, dict]:
     """Train all models for one fold, return (topk_report_df, metrics_dict)."""
 
@@ -108,173 +97,18 @@ def run_single_fold(
         print(f"[SKIP] Fold {test_year}: empty split")
         return pd.DataFrame(), {}
 
-    # --- Train all models ---
-    common_kw = dict(use_dynamic=False)
-
-    # Milestone chain
-    win_model = train_binary_stage_model(
-        train_df, valid_df, target="win_flag", condition_col=None,
-        depth=6, l2_leaf_reg=5.0, learning_rate=0.03, iterations=1000,
-        auto_class_weights="Balanced", **common_kw,
-    )
-    bt_place_given_win_model = train_binary_stage_model(
-        train_df, valid_df, target="bt_place_flag", condition_col="win_flag",
-        depth=5, l2_leaf_reg=10.0, learning_rate=0.03, iterations=1000,
-        auto_class_weights="Balanced", **common_kw,
+    # Train and evaluate via pipeline
+    topk, metrics, _ = train_and_evaluate(
+        train_df, valid_df, test_df,
+        feature_set=feature_set,
+        score_cols=score_cols,
+        ks=ks,
+        graceful_conditional=True,
     )
 
-    # Deep conditional models may fail on small subsets — graceful fallback
-    try:
-        bt_win_given_bt_place_model = train_binary_stage_model(
-            train_df, valid_df, target="bt_win_flag", condition_col="bt_place_flag",
-            depth=5, l2_leaf_reg=12.0, learning_rate=0.03, iterations=1200,
-            auto_class_weights="Balanced", **common_kw,
-        )
-    except ValueError as e:
-        print(f"[WARN] bt_win_given_bt_place failed: {e}. Using base-rate fallback.")
-        bt_win_given_bt_place_model = None
-
-    try:
-        graded_given_bt_win_model = train_binary_stage_model(
-            train_df, valid_df, target="graded_win_flag", condition_col="bt_win_flag",
-            depth=4, l2_leaf_reg=20.0, learning_rate=0.02, iterations=1500,
-            auto_class_weights="Balanced", **common_kw,
-        )
-    except ValueError as e:
-        print(f"[WARN] graded_given_bt_win failed: {e}. Using base-rate fallback.")
-        graded_given_bt_win_model = None
-
-    # Prize models
-    positive_prize_model = train_binary_stage_model(
-        train_df, valid_df, target="positive_prize_flag", condition_col=None,
-        depth=6, l2_leaf_reg=5.0, learning_rate=0.03, iterations=1000,
-        auto_class_weights=None, **common_kw,
-    )
-    prize_model = train_positive_regressor(train_df, valid_df, **common_kw)
-
-    # Ceiling models
-    prize_ge_10m_model = train_binary_stage_model(
-        train_df, valid_df, target="pog_total_prize_ge_10m_flag", condition_col=None,
-        depth=5, l2_leaf_reg=10.0, learning_rate=0.03, iterations=1200,
-        auto_class_weights="Balanced", **common_kw,
-    )
-    prize_ge_30m_model = train_binary_stage_model(
-        train_df, valid_df, target="pog_total_prize_ge_30m_flag", condition_col=None,
-        depth=4, l2_leaf_reg=15.0, learning_rate=0.02, iterations=1500,
-        auto_class_weights="Balanced", **common_kw,
-    )
-
-    # Quantile regressors
-    q80_model = train_quantile_regressor(
-        train_df, valid_df, alpha=0.8, depth=4, l2_leaf_reg=15.0,
-        learning_rate=0.02, iterations=2000, **common_kw,
-    )
-    q90_model = train_quantile_regressor(
-        train_df, valid_df, alpha=0.9, depth=4, l2_leaf_reg=15.0,
-        learning_rate=0.02, iterations=2000, **common_kw,
-    )
-
-    # --- Build test predictions ---
-    keep_cols = [
-        c for c in [
-            "ketto_num", "birth_year",
-            "pog_total_prize", "win_flag", "bt_place_flag",
-            "bt_win_flag", "graded_win_flag", "positive_prize_flag",
-            "pog_total_prize_ge_10m_flag", "pog_total_prize_ge_30m_flag",
-        ]
-        if c in test_df.columns
-    ]
-    test_pred = test_df[keep_cols].copy()
-
-    # Milestone predictions (with None-model fallback)
-    p_win = predict_binary(win_model, test_df, "win_flag")
-    p_bt_place_given_win = predict_binary(bt_place_given_win_model, test_df, "bt_place_flag")
-
-    if bt_win_given_bt_place_model is not None:
-        p_bt_win_given_bt_place = predict_binary(bt_win_given_bt_place_model, test_df, "bt_win_flag")
-    else:
-        base_rate_bt_win = train_df.loc[train_df["bt_place_flag"] == 1, "bt_win_flag"].mean()
-        p_bt_win_given_bt_place = np.full(len(test_df), base_rate_bt_win)
-        print(f"  [fallback] p_bt_win_given_bt_place = {base_rate_bt_win:.4f}")
-
-    if graded_given_bt_win_model is not None:
-        p_graded_given_bt_win = predict_binary(graded_given_bt_win_model, test_df, "graded_win_flag")
-    else:
-        base_rate_graded_win = train_df.loc[train_df["bt_win_flag"] == 1, "graded_win_flag"].mean()
-        p_graded_given_bt_win = np.full(len(test_df), base_rate_graded_win)
-        print(f"  [fallback] p_graded_given_bt_win = {base_rate_graded_win:.4f}")
-
-    p_bt_place = p_win * p_bt_place_given_win
-    p_bt_win = p_bt_place * p_bt_win_given_bt_place
-    p_graded_win = p_bt_win * p_graded_given_bt_win
-
-    test_pred["p_win"] = p_win
-    test_pred["p_bt_place_given_win"] = p_bt_place_given_win
-    test_pred["p_bt_place"] = p_bt_place
-    test_pred["p_bt_win_given_bt_place"] = p_bt_win_given_bt_place
-    test_pred["p_bt_win"] = p_bt_win
-    test_pred["p_graded_given_bt_win"] = p_graded_given_bt_win
-    test_pred["p_graded_win"] = p_graded_win
-
-    # Prize predictions
-    test_pred["p_positive_prize"] = predict_binary(positive_prize_model, test_df, "positive_prize_flag")
-    test_pred["pred_log_prize_pos"] = predict_regressor(prize_model, test_df)
-    test_pred["pred_positive_prize_amount"] = np.clip(np.expm1(test_pred["pred_log_prize_pos"]), 0, None)
-    test_pred["expected_pog_prize"] = test_pred["p_positive_prize"] * test_pred["pred_positive_prize_amount"]
-
-    # Ceiling predictions
-    test_pred["p_prize_ge_10m"] = predict_binary(prize_ge_10m_model, test_df, "pog_total_prize_ge_10m_flag")
-    test_pred["p_prize_ge_30m"] = predict_binary(prize_ge_30m_model, test_df, "pog_total_prize_ge_30m_flag")
-
-    # Quantile predictions
-    test_pred["q80_log_prize"] = predict_regressor(q80_model, test_df)
-    test_pred["q90_log_prize"] = predict_regressor(q90_model, test_df)
-    test_pred["q80_prize"] = np.clip(np.expm1(test_pred["q80_log_prize"]), 0, None)
-    test_pred["q90_prize"] = np.clip(np.expm1(test_pred["q90_log_prize"]), 0, None)
-
-    # Blended scores
-    valid_pred = valid_df.copy()
-    valid_pred["p_win"] = predict_binary(win_model, valid_df, "win_flag")
-    valid_pred["p_bt_place_given_win"] = predict_binary(bt_place_given_win_model, valid_df, "bt_place_flag")
-    if bt_win_given_bt_place_model is not None:
-        valid_pred["p_bt_win_given_bt_place"] = predict_binary(bt_win_given_bt_place_model, valid_df, "bt_win_flag")
-    else:
-        valid_pred["p_bt_win_given_bt_place"] = np.full(len(valid_df), base_rate_bt_win)
-    if graded_given_bt_win_model is not None:
-        valid_pred["p_graded_given_bt_win"] = predict_binary(graded_given_bt_win_model, valid_df, "graded_win_flag")
-    else:
-        valid_pred["p_graded_given_bt_win"] = np.full(len(valid_df), base_rate_graded_win)
-        
-    valid_pred["p_bt_place"] = valid_pred["p_win"] * valid_pred["p_bt_place_given_win"]
-    valid_pred["p_bt_win"] = valid_pred["p_bt_place"] * valid_pred["p_bt_win_given_bt_place"]
-    valid_pred["p_graded_win"] = valid_pred["p_bt_win"] * valid_pred["p_graded_given_bt_win"]
-
-    valid_pred["p_positive_prize"] = predict_binary(positive_prize_model, valid_df, "positive_prize_flag")
-    valid_pred["pred_log_prize_pos"] = predict_regressor(prize_model, valid_df)
-    valid_pred["pred_positive_prize_amount"] = np.clip(np.expm1(valid_pred["pred_log_prize_pos"]), 0, None)
-    valid_pred["expected_pog_prize"] = valid_pred["p_positive_prize"] * valid_pred["pred_positive_prize_amount"]
-    valid_pred["p_prize_ge_10m"] = predict_binary(prize_ge_10m_model, valid_df, "pog_total_prize_ge_10m_flag")
-    valid_pred["p_prize_ge_30m"] = predict_binary(prize_ge_30m_model, valid_df, "pog_total_prize_ge_30m_flag")
-    valid_pred["q90_log_prize"] = predict_regressor(q90_model, valid_df)
-    valid_pred["q90_prize"] = np.clip(np.expm1(valid_pred["q90_log_prize"]), 0, None)
-
-    ceiling_weights = fit_ceiling_weights(valid_pred)
-    
-    test_pred = build_blended_scores(test_pred, ceiling_weights=ceiling_weights)
-
-    # --- Top-k report ---
-    topk = build_topk_report(test_pred, score_cols=score_cols, ks=ks)
     topk["test_year"] = test_year
     topk["train_range"] = f"{train_start}-{train_end}"
-
-    # --- Metrics ---
-    from eval import evaluate_binary
-    metrics = {"test_year": test_year}
-    metrics.update(evaluate_binary(test_pred["win_flag"], test_pred["p_win"], "win"))
-    metrics.update(evaluate_binary(test_pred["bt_place_flag"], test_pred["p_bt_place"], "bt_place"))
-    metrics.update(evaluate_binary(test_pred["graded_win_flag"], test_pred["p_graded_win"], "graded_win"))
-    metrics.update(evaluate_binary(test_pred["pog_total_prize_ge_10m_flag"], test_pred["p_prize_ge_10m"], "prize_ge_10m"))
-    metrics.update(evaluate_binary(test_pred["pog_total_prize_ge_30m_flag"], test_pred["p_prize_ge_30m"], "prize_ge_30m"))
+    metrics["test_year"] = test_year
 
     return topk, metrics
 
@@ -307,6 +141,7 @@ def aggregate_rolling_results(detail_df: pd.DataFrame) -> pd.DataFrame:
 
 def main():
     cfg = Config()
+    feature_set = FeatureSet()  # all features ON
 
     print("=== LOADING DATA ===")
     completed_years = load_completed_birth_years(cfg)
@@ -346,7 +181,7 @@ def main():
     all_metrics = []
 
     for fold in folds:
-        topk, metrics = run_single_fold(df, fold, score_cols, ks)
+        topk, metrics = run_single_fold(df, fold, feature_set, score_cols, ks)
         if len(topk) > 0:
             all_topk.append(topk)
             all_metrics.append(metrics)
@@ -379,7 +214,6 @@ def main():
     print(metrics_df.to_string(index=False))
 
     print("\n--- Top-k Summary (mean across folds) ---")
-    # Show key comparisons for score_balanced vs score_ceiling vs score_ceiling_old
     key_scores = ["score_balanced", "score_ceiling", "score_ceiling_old", "p_bt_win"]
     key_summary = summary_df[summary_df["score_col"].isin(key_scores)].copy()
     display_cols = [c for c in [
