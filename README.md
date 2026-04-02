@@ -13,6 +13,7 @@
 通过严格的因果路径约束条件概率，确保输出的逻辑一致性：
 $$ P(\text{win}) \rightarrow P(\text{bt\_place} \mid \text{win}) \rightarrow P(\text{bt\_win} \mid \text{bt\_place}) \rightarrow P(\text{graded\_win} \mid \text{bt\_win}) $$
 这种做法不仅保证了概率无倒挂（比如 $P(\text{graded}) \le P(\text{bt\_win})$ 必然成立），还能从历代数据中挖掘不同阶段的差异化特征。
+另外，为应对漏斗底端（如预测重赏胜）样本过于稀少导致模型失败或高方差的情况，系统引入了 `graceful_conditional` 退坡机制，在极小样本下自动使用历史基础胜率 (Base Rate Fallback) 增强鲁棒性。
 
 ### 2. 奖金与天花板期望 (Prize & Ceiling Modelling)
 在基本的里程碑之上，补充了针对“奖金与上限”的维度：
@@ -22,7 +23,7 @@ $$ P(\text{win}) \rightarrow P(\text{bt\_place} \mid \text{win}) \rightarrow P(\
 ### 3. 多元综合打分 (Blended Scoring)
 模型输出多个维度的预测后，为了实战筛选，系统会计算最终的核心排名分数：
 * **`score_balanced` (均衡分)：** 注重下限与稳定性，手工固定权重并综合各个里程碑概率。
-* **`score_ceiling` (上限分 / 最新特性 🔥)：** 注重找出“真正能拿高奖金的马”。系统摒弃了人工拍脑袋的超参数，而是使用 **带非负约束的回归（LinearRegression(positive=True)）** 在每次的独立**验证集**上自适应学习出各项高上限指标（包含 $3000万概率$、Q90预测、$期望奖金$ 等）的最优权重组合，并直接用于测试集。既最大化寻找暴击马的能力，同时也完全规避了训练集的穿越泄漏。
+* **`score_ceiling` (上限分 / 最新特性 🔥)：** 注重找出“真正能拿高奖金的马”。系统并未使用人工拍脑袋的超参数，而是使用 **带非负约束的回归（LinearRegression(positive=True)）** 在每次的独立**验证集**上自适应学习出各项高上限指标（包含 $3000万概率$、Q90预测、$期望奖金$ 等）的最优权重组合，并直接用于测试集。既最大化寻找暴击马的能力，同时也完全规避了训练集的穿越泄漏。
 
 ---
 
@@ -33,37 +34,66 @@ $$ P(\text{win}) \rightarrow P(\text{bt\_place} \mid \text{win}) \rightarrow P(\
 由 `pog` schema 构建起完善的数据管线：
 * **`pog.cohort_calendar`：** 精确框定不同出生年的 POG 计算窗口。
 * **`pog.mv_horse_master / mv_horse_labels`：** 底表拉齐与标签（win/bt/graded/prize 等）清洗聚合。
-* **静态特征群 (`mv_static_features`)：** 当前聚焦静态数据，涵盖出生季节、父系/母系/练马师/牧场的历史同期滚动统计数据（严格约束时间截点，杜绝未来函数）、基础马匹背景等。
+* **静态特征群 (`mv_static_features_v2`)：** 当前聚焦静态数据，全面引入了多维复杂网络历史评价体系：
+  * 出生季节、父系/母系/练马师/牧场的历史同期滚动统计数据。
+  * **母系繁育表现：** 引入同母兄姊 (Maternal Sibling) 与全血兄姊 (Full Sibling) 的过往战绩胜率、重赏打分与奖金记录。
+  * **组合特化与外祖父：** 引入父系与外祖父配合 (Sire x Damsire Nick) 历史数据与母父 (Damsire) 独立战绩评价。
+  * **培育组合：** 引入繁育牧场与练马师的配合历史 (Breeder x Trainer) 数据。
+  * 严密约束所有统计算法为累积至马匹当年的安全快照时间点，彻底杜绝数据穿越（未来函数）。
 
 ---
 
 ## 📂 工程结构 (Python)
 
-* **`src/config.py`**：核心基础配置文件。
-* **`src/data.py`**：处理训练用底层数据的拉取，并自带对有效 Label Cohort 的状态管理。
-* **`src/features.py`**：特征元数据定义及 CatBoost 所需矩阵（Pool）构建。
-* **`src/eval.py`**：针对二分类、回归等建立各种 Metric 的评估系统。
-* **`src/train.py`**：标准训练主流程脚本。自动划分时序 Train/Valid/Test（例如用 1995-2020 训练，2021 验证并学习 Ceiling 参数，2022 测试）。内部自动化训练 10 层子模型串联网络并进行评估与导出。
-* **`src/backtest.py`**：极为严谨的 **滚动回测 (Rolling Backtest)** 脚本。对多组过往届别（例如 Test = 2019/2020/2021/2022）分别重跑各自的历史子集、独立学习当年 Valid 权重并分别给出 Top-K 回测详单。
+最新的代码结构已被重新经过模块化构筑重构：
+
+### 核心支持模块
+* **`src/config.py`**：核心基础数据库与路径配置文件。
+* **`src/data.py`**：处理训练用底层数据的拉取与有效 Label Cohort 状态管理。
+* **`src/features.py`**：详尽确立了 `FeatureSet` 特征群组件元数据与动态配置，处理基础特征矩阵 `Pool` 构建与缺失值清洗。
+* **`src/pipeline.py`**：所有训练与评估逻辑的中枢。提供了 `train_all_models` 标准流、并管理强大的统一模型簇对象 `ModelBundle` 的本地序列化存储与推断加载功能。
+* **`src/eval.py`**：针对各类分类与回归的 Metric 评估系统。
+
+### 任务脚本与工具流
+* **`src/train.py`**：标准训练验证主流程脚本，常用于训练完整特征集下用于实战的候选模型簇（最终输出至例如 `models_recommended/`）。
+* **`src/backtest.py`**：强大的 **滚动回测 (Rolling Backtest)** 脚本系统。在时间轴上切分历史进行多重交叉回测，输出不同年份预测的一致性和各项特征效果评价。
+* **`src/score_cohorts.py`**：**实战打分脚本**。用于调用已序列化的 `ModelBundle` （如 `models_recommended/`）系统，直接预测与生成例如最新 `2023` 或 `2024` POG 候选马的精选 Shortlist CSV（包含 Top-20, Top-50, Top-100 等）。
+* **`src/ablation.py` & `src/analyze_ablation.py`**：消融实验及自动化特征收益对比分析系统，通过对特定 `FeatureSet` 中的群组作控制变量比较各新加入的繁育特征群（兄姊战绩、Nick配合等）的表现与 Lift 增益。
+* **`src/analyze_features.py`**：**模型归因与可解释性模块**。包含特征重要性全局打分（Feature Importance）输出，以及针对特定局部预测生成的解释 **SHAP Waterfall / Summary Plots** 图形解析能力。
 
 ---
 
 ## 🚀 快速启动
 
-执行训练并生成单一测试组（通常使用倒数第一年）的报告：
+1️⃣ **执行基础训练并导出核心模型** (会使用倒数一年的数据作为预测测试，剩余作为训练与调参)：
 ```bash
 uv run python src/train.py
 ```
 
-执行严格的历史滚动回测，并输出系统跨届别的选马一致性：
+2️⃣ **实战运用与对最新/未开赛的一届新马作预测评分筛选**：
+```bash
+# 默认使用 models_recommended/ 预测 2023, 2024
+uv run python src/score_cohorts.py 
+```
+
+3️⃣ **执行严格的历史滚动回测看特征群长效表现**：
 ```bash
 uv run python src/backtest.py
 ```
-> 相关产出文件（指标统计、模型预测详单、Top-K汇总以及合并模型文件 json）均保存在根目录 `outputs/` 与 `models/` 下。
+
+4️⃣ **特征影响力及分析（全局与分析特定一匹马的神器）**：
+```bash
+# 生成核心子模型的 SHAP 图和全局重要性 
+uv run python src/analyze_features.py --model-dir models_recommended
+
+# 针对某匹马生成该马得到评分的详细推导特征瀑布图
+uv run python src/analyze_features.py --model-dir models_recommended --years 2023 --ketto-num <血统号>
+```
+> 相关产出文件（指标统计、各类 csv 预测详单、消融分析以及 SHAP 解析图）均保存在根目录 `outputs/`，模型则会保存在 `models/`（或您指定的预测集合目录下）。
 
 ---
 
 ## 🎯 优先改进规划 (Next Steps)
-1. 增强母系及组合特征库（引入同母兄姊历史战绩、Sire x Damsire Nick 特征）。
-2. 在深层条件网络上进行模型规模压降或基准缩水 (Shrinkage)，应对漏斗底端（如打分级赛时）样本稀少的高方差情况。
-3. 对输出概率进一步做 Platt Scaling 或 Isotonic 校准，使预测概率贴切实战意义。
+1. 对输出概率进一步做 Platt Scaling 或 Isotonic 校准，使里程碑中产生的预测概率严格贴切实战的真实赔率与兑现意义。
+2. 考虑针对父系/外祖父/练马师加入更加丰富的“主被动协同靶向惩罚”或赛道相性分析。
+3. 建立可视化界面的 UI 与预测查询数据库系统。
