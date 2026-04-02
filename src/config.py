@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 import os
 from dotenv import load_dotenv
@@ -26,3 +26,58 @@ class Config:
     test_birth_year_end: int = 2022
 
     use_dynamic_features: bool = False
+
+    # 模型训练的超参数字典
+    model_configs: dict = field(default_factory=lambda: {
+        "win": {
+            "target": "win_flag",
+            "condition_col": None,
+            "depth": 6, "l2_leaf_reg": 5.0, "learning_rate": 0.03, "iterations": 1000,
+            "auto_class_weights": "Balanced"
+        },
+        "bt_place_given_win": {
+            "target": "bt_place_flag",
+            "condition_col": "win_flag",
+            "depth": 5, "l2_leaf_reg": 10.0, "learning_rate": 0.03, "iterations": 1000,
+            "auto_class_weights": "Balanced"
+        },
+        "bt_win_given_bt_place": {
+            "target": "bt_win_flag",
+            "condition_col": "bt_place_flag",
+            "depth": 5, "l2_leaf_reg": 12.0, "learning_rate": 0.03, "iterations": 1200,
+            "auto_class_weights": "Balanced"
+        },
+        "graded_given_bt_win": {
+            "target": "graded_win_flag",
+            "condition_col": "bt_win_flag",
+            "depth": 4, "l2_leaf_reg": 20.0, "learning_rate": 0.02, "iterations": 1500,
+            "auto_class_weights": "Balanced"
+        },
+        "positive_prize": {
+            "target": "positive_prize_flag",
+            "condition_col": None,
+            "depth": 6, "l2_leaf_reg": 5.0, "learning_rate": 0.03, "iterations": 1000,
+            "auto_class_weights": None
+        },
+        "prize_ge_10m": {
+            "target": "pog_total_prize_ge_10m_flag",
+            "condition_col": None,
+            "depth": 5, "l2_leaf_reg": 10.0, "learning_rate": 0.03, "iterations": 1200,
+            "auto_class_weights": "Balanced"
+        },
+        "prize_ge_30m": {
+            "target": "pog_total_prize_ge_30m_flag",
+            "condition_col": None,
+            "depth": 4, "l2_leaf_reg": 15.0, "learning_rate": 0.02, "iterations": 1500,
+            "auto_class_weights": "Balanced"
+        },
+        "prize_regressor": {
+            "depth": 4, "l2_leaf_reg": 20.0, "learning_rate": 0.02, "iterations": 2000
+        },
+        "q80_regressor": {
+            "alpha": 0.8, "depth": 4, "l2_leaf_reg": 15.0, "learning_rate": 0.02, "iterations": 2000
+        },
+        "q90_regressor": {
+            "alpha": 0.9, "depth": 4, "l2_leaf_reg": 15.0, "learning_rate": 0.02, "iterations": 2000
+        }
+    })

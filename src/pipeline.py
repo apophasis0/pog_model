@@ -18,6 +18,7 @@ from catboost import CatBoostClassifier, CatBoostRegressor, Pool
 from sklearn.linear_model import LinearRegression
 
 from features import FeatureSet, prepare_matrix, add_log_target
+from config import Config
 
 
 # =========================
@@ -93,7 +94,10 @@ def train_binary_stage_model(
     return model
 
 
-def train_positive_regressor(train_df, valid_df, feature_set: FeatureSet):
+def train_positive_regressor(
+    train_df, valid_df, feature_set: FeatureSet,
+    depth=4, l2_leaf_reg=20.0, learning_rate=0.02, iterations=2000
+):
     train_pos = train_df[train_df["pog_total_prize"] > 0].copy()
     valid_pos = valid_df[valid_df["pog_total_prize"] > 0].copy()
 
@@ -111,10 +115,10 @@ def train_positive_regressor(train_df, valid_df, feature_set: FeatureSet):
     model = CatBoostRegressor(
         loss_function="MAE",
         eval_metric="MAE",
-        iterations=2000,
-        learning_rate=0.02,
-        depth=4,
-        l2_leaf_reg=20.0,
+        iterations=iterations,
+        learning_rate=learning_rate,
+        depth=depth,
+        l2_leaf_reg=l2_leaf_reg,
         random_seed=42,
         verbose=100,
         od_type="Iter",
@@ -430,6 +434,7 @@ def train_all_models(
     valid_df: pd.DataFrame,
     feature_set: FeatureSet,
     graceful_conditional: bool = False,
+    config: Config | None = None,
 ) -> ModelBundle:
     """Train all models and learn ceiling weights.
 
@@ -440,120 +445,95 @@ def train_all_models(
         graceful_conditional: If True, allow conditional models (bt_win|bt_place,
             graded|bt_win) to fail gracefully (set to None). Used in rolling
             backtest where subsets can be small.
+        config: Configuration containing model hyperparameters.
     """
+    if config is None:
+        config = Config()
 
-    # Milestone chain
-    print("\n=== TRAIN NESTED MILESTONE MODELS ===")
+    mc = config.model_configs
+    models = {}
 
-    win_model = train_binary_stage_model(
-        train_df, valid_df, target="win_flag", feature_set=feature_set,
-        condition_col=None,
-        depth=6, l2_leaf_reg=5.0, learning_rate=0.03, iterations=1000,
-        auto_class_weights="Balanced",
-    )
-    bt_place_given_win_model = train_binary_stage_model(
-        train_df, valid_df, target="bt_place_flag", feature_set=feature_set,
-        condition_col="win_flag",
-        depth=5, l2_leaf_reg=10.0, learning_rate=0.03, iterations=1000,
-        auto_class_weights="Balanced",
-    )
-
-    bt_win_given_bt_place_model = None
-    graded_given_bt_win_model = None
-
-    if graceful_conditional:
-        try:
-            bt_win_given_bt_place_model = train_binary_stage_model(
-                train_df, valid_df, target="bt_win_flag", feature_set=feature_set,
-                condition_col="bt_place_flag",
-                depth=5, l2_leaf_reg=12.0, learning_rate=0.03, iterations=1200,
-                auto_class_weights="Balanced",
-            )
-        except ValueError as e:
-            print(f"[WARN] bt_win_given_bt_place failed: {e}. Using base-rate fallback.")
-
-        try:
-            graded_given_bt_win_model = train_binary_stage_model(
-                train_df, valid_df, target="graded_win_flag", feature_set=feature_set,
-                condition_col="bt_win_flag",
-                depth=4, l2_leaf_reg=20.0, learning_rate=0.02, iterations=1500,
-                auto_class_weights="Balanced",
-            )
-        except ValueError as e:
-            print(f"[WARN] graded_given_bt_win failed: {e}. Using base-rate fallback.")
-    else:
-        bt_win_given_bt_place_model = train_binary_stage_model(
-            train_df, valid_df, target="bt_win_flag", feature_set=feature_set,
-            condition_col="bt_place_flag",
-            depth=5, l2_leaf_reg=12.0, learning_rate=0.03, iterations=1200,
-            auto_class_weights="Balanced",
-        )
-        graded_given_bt_win_model = train_binary_stage_model(
-            train_df, valid_df, target="graded_win_flag", feature_set=feature_set,
-            condition_col="bt_win_flag",
-            depth=4, l2_leaf_reg=20.0, learning_rate=0.02, iterations=1500,
-            auto_class_weights="Balanced",
+    # Category 1: Standard Binary Stage Models
+    binary_model_keys = [
+        "win", 
+        "bt_place_given_win", 
+        "positive_prize", 
+        "prize_ge_10m", 
+        "prize_ge_30m"
+    ]
+    
+    print("\n=== TRAIN STANDARD BINARY MODELS ===")
+    for key in binary_model_keys:
+        print(f"Training {key} model...")
+        models[key] = train_binary_stage_model(
+            train_df, valid_df, feature_set=feature_set, **mc[key]
         )
 
-    # Prize models
-    print("\n=== TRAIN PRIZE MODELS ===")
+    # Category 2: Conditional Binary Stage Models
+    conditional_keys = [
+        "bt_win_given_bt_place", 
+        "graded_given_bt_win"
+    ]
+    
+    print("\n=== TRAIN CONDITIONAL BINARY MODELS ===")
+    for key in conditional_keys:
+        print(f"Training {key} model...")
+        if graceful_conditional:
+            try:
+                models[key] = train_binary_stage_model(
+                    train_df, valid_df, feature_set=feature_set, **mc[key]
+                )
+            except ValueError as e:
+                print(f"[WARN] {key} failed: {e}. Using base-rate fallback.")
+                models[key] = None
+        else:
+            models[key] = train_binary_stage_model(
+                train_df, valid_df, feature_set=feature_set, **mc[key]
+            )
 
-    positive_prize_model = train_binary_stage_model(
-        train_df, valid_df, target="positive_prize_flag", feature_set=feature_set,
-        condition_col=None,
-        depth=6, l2_leaf_reg=5.0, learning_rate=0.03, iterations=1000,
-        auto_class_weights=None,
+    # Category 3: Regressor Models
+    print("\n=== TRAIN REGRESSOR MODELS ===")
+    print("Training prize_model...")
+    prize_model = train_positive_regressor(
+        train_df, valid_df, feature_set=feature_set, **mc["prize_regressor"]
     )
-    prize_model = train_positive_regressor(train_df, valid_df, feature_set=feature_set)
-
-    # Ceiling models
-    print("\n=== TRAIN CEILING MODELS ===")
-
-    prize_ge_10m_model = train_binary_stage_model(
-        train_df, valid_df, target="pog_total_prize_ge_10m_flag", feature_set=feature_set,
-        condition_col=None,
-        depth=5, l2_leaf_reg=10.0, learning_rate=0.03, iterations=1200,
-        auto_class_weights="Balanced",
-    )
-    prize_ge_30m_model = train_binary_stage_model(
-        train_df, valid_df, target="pog_total_prize_ge_30m_flag", feature_set=feature_set,
-        condition_col=None,
-        depth=4, l2_leaf_reg=15.0, learning_rate=0.02, iterations=1500,
-        auto_class_weights="Balanced",
-    )
-
-    # Quantile regressors
-    print("\n=== TRAIN QUANTILE REGRESSORS ===")
-
+    
+    print("Training q80_model...")
     q80_model = train_quantile_regressor(
-        train_df, valid_df, feature_set=feature_set,
-        alpha=0.8, depth=4, l2_leaf_reg=15.0, learning_rate=0.02, iterations=2000,
+        train_df, valid_df, feature_set=feature_set, **mc["q80_regressor"]
     )
+    
+    print("Training q90_model...")
     q90_model = train_quantile_regressor(
-        train_df, valid_df, feature_set=feature_set,
-        alpha=0.9, depth=4, l2_leaf_reg=15.0, learning_rate=0.02, iterations=2000,
+        train_df, valid_df, feature_set=feature_set, **mc["q90_regressor"]
     )
 
     # Learn ceiling weights on validation set
     print("\n=== LEARN CEILING WEIGHTS ===")
     ceiling_weights = _learn_ceiling_weights(
-        valid_df, win_model, bt_place_given_win_model,
-        bt_win_given_bt_place_model, graded_given_bt_win_model,
-        positive_prize_model, prize_model,
-        prize_ge_10m_model, prize_ge_30m_model, q90_model,
+        valid_df, 
+        models["win"], 
+        models["bt_place_given_win"],
+        models["bt_win_given_bt_place"], 
+        models["graded_given_bt_win"],
+        models["positive_prize"], 
+        prize_model,
+        models["prize_ge_10m"], 
+        models["prize_ge_30m"], 
+        q90_model,
         feature_set, train_df,
     )
     print("Learned Ceiling Weights:", ceiling_weights)
 
     return ModelBundle(
-        win_model=win_model,
-        bt_place_given_win_model=bt_place_given_win_model,
-        bt_win_given_bt_place_model=bt_win_given_bt_place_model,
-        graded_given_bt_win_model=graded_given_bt_win_model,
-        positive_prize_model=positive_prize_model,
+        win_model=models["win"],
+        bt_place_given_win_model=models["bt_place_given_win"],
+        bt_win_given_bt_place_model=models["bt_win_given_bt_place"],
+        graded_given_bt_win_model=models["graded_given_bt_win"],
+        positive_prize_model=models["positive_prize"],
         prize_model=prize_model,
-        prize_ge_10m_model=prize_ge_10m_model,
-        prize_ge_30m_model=prize_ge_30m_model,
+        prize_ge_10m_model=models["prize_ge_10m"],
+        prize_ge_30m_model=models["prize_ge_30m"],
         q80_model=q80_model,
         q90_model=q90_model,
         ceiling_weights=ceiling_weights,
