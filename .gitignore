@@ -13,6 +13,8 @@ wheels/
 .env
 
 # Models
-models/
+models*/
 catboost_info/
 outputs/
+
+.vscode/

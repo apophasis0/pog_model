@@ -14,10 +14,14 @@ from dataclasses import dataclass, asdict
 import joblib
 import numpy as np
 import pandas as pd
-from catboost import CatBoostClassifier, CatBoostRegressor, Pool
+from catboost import CatBoostClassifier, CatBoostRegressor, CatBoostRanker, Pool
 from sklearn.linear_model import LinearRegression
+from sklearn.isotonic import IsotonicRegression
 
-from features import FeatureSet, prepare_matrix, add_log_target
+from features import (
+    FeatureSet, prepare_matrix, add_log_target,
+    fit_category_frequencies, apply_rare_filter,
+)
 from config import Config
 
 
@@ -53,7 +57,16 @@ def train_binary_stage_model(
     learning_rate: float = 0.03,
     iterations: int = 1000,
     auto_class_weights: str | None = "Balanced",
+    ctr_leaf_count_limit: int | None = None,
+    calibrate_probability: bool = True,
 ):
+    """Train a binary classifier with optional isotonic probability calibration.
+
+    Probability calibration is important because tree models under Logloss tend
+    to produce probabilities that deviate from true distributions. When
+    chaining multiple models (e.g., P(bt_place) = P(win) * P(bt_place|win)),
+    uncalibrated probabilities can compound errors exponentially.
+    """
     train_sub = subset_by_condition(train_df, condition_col)
     valid_sub = subset_by_condition(valid_df, condition_col)
 
@@ -72,7 +85,7 @@ def train_binary_stage_model(
     X_train, y_train, _, cat_cols = prepare_matrix(train_sub, feature_set=feature_set)
     X_valid, y_valid, _, _ = prepare_matrix(valid_sub, feature_set=feature_set)
 
-    model = CatBoostClassifier(
+    cb_kwargs: dict = dict(
         loss_function="Logloss",
         eval_metric="AUC",
         iterations=iterations,
@@ -85,18 +98,42 @@ def train_binary_stage_model(
         od_type="Iter",
         od_wait=100,
     )
+    if ctr_leaf_count_limit is not None:
+        cb_kwargs["ctr_leaf_count_limit"] = ctr_leaf_count_limit
+
+    model = CatBoostClassifier(**cb_kwargs)
 
     model.fit(
         build_pool(X_train, y_train[target], cat_cols),
         eval_set=build_pool(X_valid, y_valid[target], cat_cols),
         use_best_model=True,
     )
+
+    # --- Isotonic probability calibration ---
+    # For sklearn >= 1.6, CalibratedClassifierCV no longer supports cv='prefit'.
+    # We wrap the CatBoost model in a thin proxy that applies isotonic regression
+    # on top of its predicted probabilities.
+    if calibrate_probability and len(valid_sub) >= 20:
+        print(f"[{target}] Applying isotonic probability calibration on valid set...")
+
+        # Get raw probabilities from the trained CatBoost model on validation set
+        raw_probs = model.predict_proba(X_valid)[:, 1]
+
+        # Fit isotonic regressor to map raw probabilities -> true labels
+        iso_reg = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
+        iso_reg.fit(raw_probs, y_valid[target])
+
+        # Store calibration state on the model so predict_binary can use it
+        model._calibration_iso_reg = iso_reg
+        print(f"[{target}] Probability calibration complete.")
+
     return model
 
 
 def train_positive_regressor(
     train_df, valid_df, feature_set: FeatureSet,
-    depth=4, l2_leaf_reg=20.0, learning_rate=0.02, iterations=2000
+    depth=4, l2_leaf_reg=20.0, learning_rate=0.02, iterations=2000,
+    ctr_leaf_count_limit: int | None = None,
 ):
     train_pos = train_df[train_df["pog_total_prize"] > 0].copy()
     valid_pos = valid_df[valid_df["pog_total_prize"] > 0].copy()
@@ -112,7 +149,7 @@ def train_positive_regressor(
     X_train, _, _, cat_cols = prepare_matrix(train_pos, feature_set=feature_set)
     X_valid, _, _, _ = prepare_matrix(valid_pos, feature_set=feature_set)
 
-    model = CatBoostRegressor(
+    cb_kwargs: dict = dict(
         loss_function="MAE",
         eval_metric="MAE",
         iterations=iterations,
@@ -124,6 +161,10 @@ def train_positive_regressor(
         od_type="Iter",
         od_wait=100,
     )
+    if ctr_leaf_count_limit is not None:
+        cb_kwargs["ctr_leaf_count_limit"] = ctr_leaf_count_limit
+
+    model = CatBoostRegressor(**cb_kwargs)
 
     model.fit(
         build_pool(X_train, train_pos["log_pog_total_prize"], cat_cols),
@@ -137,6 +178,7 @@ def train_quantile_regressor(
     train_df, valid_df, feature_set: FeatureSet,
     alpha=0.9,
     depth=4, l2_leaf_reg=15.0, learning_rate=0.02, iterations=2000,
+    ctr_leaf_count_limit: int | None = None,
 ):
     """Train a quantile regression on log1p(prize) for positive-prize samples."""
     train_pos = train_df[train_df["pog_total_prize"] > 0].copy()
@@ -153,7 +195,7 @@ def train_quantile_regressor(
     X_train, _, _, cat_cols = prepare_matrix(train_pos, feature_set=feature_set)
     X_valid, _, _, _ = prepare_matrix(valid_pos, feature_set=feature_set)
 
-    model = CatBoostRegressor(
+    cb_kwargs: dict = dict(
         loss_function=f"Quantile:alpha={alpha}",
         eval_metric=f"Quantile:alpha={alpha}",
         iterations=iterations,
@@ -165,6 +207,10 @@ def train_quantile_regressor(
         od_type="Iter",
         od_wait=100,
     )
+    if ctr_leaf_count_limit is not None:
+        cb_kwargs["ctr_leaf_count_limit"] = ctr_leaf_count_limit
+
+    model = CatBoostRegressor(**cb_kwargs)
 
     model.fit(
         build_pool(X_train, train_pos["log_pog_total_prize"], cat_cols),
@@ -177,6 +223,10 @@ def train_quantile_regressor(
 def predict_binary(model, df, target, feature_set: FeatureSet):
     X, _, _, _ = prepare_matrix(df, feature_set=feature_set)
     prob = model.predict_proba(X)[:, 1]
+    # Apply isotonic calibration if it was fitted during training
+    cal = getattr(model, "_calibration_iso_reg", None)
+    if cal is not None:
+        prob = cal.predict(prob)
     return prob
 
 
@@ -184,6 +234,115 @@ def predict_regressor(model, df, feature_set: FeatureSet):
     X, _, _, _ = prepare_matrix(df, feature_set=feature_set)
     pred_log = model.predict(X)
     return pred_log
+
+
+def train_ranking_stacking_model(
+    train_df: pd.DataFrame,
+    valid_df: pd.DataFrame,
+    feature_set: FeatureSet,
+    bundle: "ModelBundle | None" = None,
+    depth: int = 4,
+    l2_leaf_reg: float = 10.0,
+    learning_rate: float = 0.02,
+    iterations: int = 1000,
+    ranking_mode: str = "YetiRank",
+) -> CatBoostRanker | None:
+    """Train a CatBoostRanker (YetiRank/PairLogit) as a stacking model.
+
+    Uses the first-stage model outputs (p_win, p_bt_place, etc.) as meta-features.
+    The target is the rank of pog_total_prize among all horses.
+
+    Returns None if there is not enough data to train.
+    """
+    # Need first-stage models to produce meta-features
+    if bundle is None:
+        print("[WARN] No bundle provided for ranking stacking model. Skipping.")
+        return None
+
+    # Filter to positive-prize horses for ranking
+    train_pos = train_df[train_df["pog_total_prize"] > 0].copy()
+    valid_pos = valid_df[valid_df["pog_total_prize"] > 0].copy()
+
+    if len(train_pos) < 50 or len(valid_pos) < 10:
+        print(f"[WARN] Not enough positive-prize data for ranking: "
+              f"train={len(train_pos)}, valid={len(valid_pos)}. Skipping.")
+        return None
+
+    # Produce first-stage predictions as meta-features
+    train_meta = predict_all(bundle, train_pos, train_df=train_df)
+    valid_meta = predict_all(bundle, valid_pos, train_df=train_df)
+
+    ranking_features = [
+        "p_win", "p_bt_place", "p_bt_win", "p_graded_win",
+        "expected_pog_prize", "p_prize_ge_10m", "p_prize_ge_30m",
+        "q80_prize", "q90_prize",
+    ]
+    available_features = [f for f in ranking_features if f in train_meta.columns]
+
+    X_train = train_meta[available_features]
+    y_train_rank = train_pos["pog_total_prize"].rank(method="average", ascending=False).values.astype(int)
+
+    X_valid = valid_meta[available_features]
+    y_valid_rank = valid_pos["pog_total_prize"].rank(method="average", ascending=False).values.astype(int)
+
+    # Create group IDs (all 1 group per dataset for global ranking)
+    train_group_id = np.zeros(len(X_train), dtype=int)
+    valid_group_id = np.zeros(len(X_valid), dtype=int)
+
+    train_pool = Pool(
+        X_train, label=y_train_rank, group_id=train_group_id
+    )
+    valid_pool = Pool(
+        X_valid, label=y_valid_rank, group_id=valid_group_id
+    )
+
+    print(f"Training ranking stacking model ({ranking_mode}) with features: {available_features}")
+
+    ranking_model = CatBoostRanker(
+        loss_function=ranking_mode,
+        eval_metric="NDCG",
+        iterations=iterations,
+        learning_rate=learning_rate,
+        depth=depth,
+        l2_leaf_reg=l2_leaf_reg,
+        random_seed=42,
+        verbose=100,
+        od_type="Iter",
+        od_wait=100,
+    )
+
+    ranking_model.fit(
+        train_pool,
+        eval_set=valid_pool,
+        use_best_model=True,
+    )
+
+    return ranking_model
+
+
+def predict_ranking(bundle: "ModelBundle", df: pd.DataFrame,
+                     train_df: pd.DataFrame | None = None) -> np.ndarray:
+    """Produce ranking scores from the stacking ranking model.
+
+    Returns ranking scores (higher = better rank) or None if model is unavailable.
+    """
+    if bundle.ranking_model is None:
+        return np.zeros(len(df))
+
+    # Produce first-stage predictions as meta-features
+    meta = predict_all(bundle, df, train_df=train_df)
+
+    ranking_features = [
+        "p_win", "p_bt_place", "p_bt_win", "p_graded_win",
+        "expected_pog_prize", "p_prize_ge_10m", "p_prize_ge_30m",
+        "q80_prize", "q90_prize",
+    ]
+    available_features = [f for f in ranking_features if f in meta.columns]
+    X = meta[available_features]
+
+    # CatBoostRanker.predict returns scores
+    scores = bundle.ranking_model.predict(X)
+    return scores
 
 
 # =========================
@@ -421,6 +580,7 @@ class ModelBundle:
     prize_ge_30m_model: CatBoostClassifier
     q80_model: CatBoostRegressor
     q90_model: CatBoostRegressor
+    ranking_model: CatBoostRanker | None  # Optional: Learning to Rank stacking model
     ceiling_weights: dict
     feature_set: FeatureSet
 
@@ -508,8 +668,48 @@ def train_all_models(
         train_df, valid_df, feature_set=feature_set, **mc["q90_regressor"]
     )
 
+    # Category 4: Ranking Stacking Model (optional, graceful failure)
+    print("\n=== TRAIN RANKING STACKING MODEL ===")
+    ranking_model = None
+    if "ranking_stacking" in mc:
+        try:
+            ranking_cfg = mc["ranking_stacking"]
+            ranking_model = train_ranking_stacking_model(
+                train_df, valid_df, feature_set=feature_set,
+                depth=ranking_cfg.get("depth", 4),
+                l2_leaf_reg=ranking_cfg.get("l2_leaf_reg", 10.0),
+                learning_rate=ranking_cfg.get("learning_rate", 0.02),
+                iterations=ranking_cfg.get("iterations", 1000),
+                ranking_mode=ranking_cfg.get("ranking_mode", "YetiRank"),
+            )
+            if ranking_model is not None:
+                print("Ranking stacking model trained successfully.")
+            else:
+                print("Ranking stacking model skipped (insufficient data).")
+        except Exception as e:
+            print(f"[WARN] Ranking stacking model failed: {e}. Skipping.")
+            ranking_model = None
+
     # Learn ceiling weights on validation set
     print("\n=== LEARN CEILING WEIGHTS ===")
+
+    # Build a partial bundle for ranking-aware ceiling weight learning
+    partial_bundle = ModelBundle(
+        win_model=models["win"],
+        bt_place_given_win_model=models["bt_place_given_win"],
+        bt_win_given_bt_place_model=models["bt_win_given_bt_place"],
+        graded_given_bt_win_model=models["graded_given_bt_win"],
+        positive_prize_model=models["positive_prize"],
+        prize_model=prize_model,
+        prize_ge_10m_model=models["prize_ge_10m"],
+        prize_ge_30m_model=models["prize_ge_30m"],
+        q80_model=q80_model,
+        q90_model=q90_model,
+        ranking_model=ranking_model,
+        ceiling_weights={},
+        feature_set=feature_set,
+    )
+
     ceiling_weights = _learn_ceiling_weights(
         valid_df, 
         models["win"], 
@@ -522,23 +722,11 @@ def train_all_models(
         models["prize_ge_30m"], 
         q90_model,
         feature_set, train_df,
+        ranking_model=ranking_model,
     )
     print("Learned Ceiling Weights:", ceiling_weights)
 
-    return ModelBundle(
-        win_model=models["win"],
-        bt_place_given_win_model=models["bt_place_given_win"],
-        bt_win_given_bt_place_model=models["bt_win_given_bt_place"],
-        graded_given_bt_win_model=models["graded_given_bt_win"],
-        positive_prize_model=models["positive_prize"],
-        prize_model=prize_model,
-        prize_ge_10m_model=models["prize_ge_10m"],
-        prize_ge_30m_model=models["prize_ge_30m"],
-        q80_model=q80_model,
-        q90_model=q90_model,
-        ceiling_weights=ceiling_weights,
-        feature_set=feature_set,
-    )
+    return partial_bundle
 
 
 def _learn_ceiling_weights(
@@ -547,6 +735,7 @@ def _learn_ceiling_weights(
     positive_prize_model, prize_model,
     prize_ge_10m_model, prize_ge_30m_model, q90_model,
     feature_set: FeatureSet, train_df: pd.DataFrame,
+    ranking_model: CatBoostRanker | None = None,
 ) -> dict:
     """Build predictions on valid_df and fit ceiling weights."""
     valid_pred = valid_df.copy()
@@ -558,13 +747,13 @@ def _learn_ceiling_weights(
     if bt_win_given_bt_place_model is not None:
         p_bt_win_given_bt_place = predict_binary(bt_win_given_bt_place_model, valid_df, "bt_win_flag", feature_set)
     else:
-        base_rate = train_df.loc[train_df["bt_place_flag"] == 1, "bt_win_flag"].mean()
+        base_rate = float(train_df.loc[train_df["bt_place_flag"] == 1, "bt_win_flag"].mean())
         p_bt_win_given_bt_place = np.full(len(valid_df), base_rate)
 
     if graded_given_bt_win_model is not None:
         p_graded_given_bt_win = predict_binary(graded_given_bt_win_model, valid_df, "graded_win_flag", feature_set)
     else:
-        base_rate = train_df.loc[train_df["bt_win_flag"] == 1, "graded_win_flag"].mean()
+        base_rate = float(train_df.loc[train_df["bt_win_flag"] == 1, "graded_win_flag"].mean())
         p_graded_given_bt_win = np.full(len(valid_df), base_rate)
 
     valid_pred["p_win"] = p_win
@@ -727,18 +916,23 @@ def save_bundle(bundle: ModelBundle, path: str, meta_extra: dict | None = None):
 
     joblib.dump(bundle.win_model, os.path.join(path, "win_model.joblib"))
     joblib.dump(bundle.bt_place_given_win_model, os.path.join(path, "bt_place_given_win_model.joblib"))
-    joblib.dump(bundle.bt_win_given_bt_place_model, os.path.join(path, "bt_win_given_bt_place_model.joblib"))
-    joblib.dump(bundle.graded_given_bt_win_model, os.path.join(path, "graded_given_bt_win_model.joblib"))
+    if bundle.bt_win_given_bt_place_model is not None:
+        joblib.dump(bundle.bt_win_given_bt_place_model, os.path.join(path, "bt_win_given_bt_place_model.joblib"))
+    if bundle.graded_given_bt_win_model is not None:
+        joblib.dump(bundle.graded_given_bt_win_model, os.path.join(path, "graded_given_bt_win_model.joblib"))
     joblib.dump(bundle.positive_prize_model, os.path.join(path, "positive_prize_model.joblib"))
     joblib.dump(bundle.prize_model, os.path.join(path, "prize_model.joblib"))
     joblib.dump(bundle.prize_ge_10m_model, os.path.join(path, "prize_ge_10m_model.joblib"))
     joblib.dump(bundle.prize_ge_30m_model, os.path.join(path, "prize_ge_30m_model.joblib"))
     joblib.dump(bundle.q80_model, os.path.join(path, "q80_model.joblib"))
     joblib.dump(bundle.q90_model, os.path.join(path, "q90_model.joblib"))
+    if bundle.ranking_model is not None:
+        joblib.dump(bundle.ranking_model, os.path.join(path, "ranking_model.joblib"))
 
     meta = {
         "ceiling_weights": bundle.ceiling_weights,
         "feature_set": asdict(bundle.feature_set),
+        "has_ranking_model": bundle.ranking_model is not None,
     }
     if meta_extra:
         meta.update(meta_extra)

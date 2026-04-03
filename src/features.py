@@ -214,6 +214,56 @@ class FeatureSet:
         return "no_" + "_".join(d.replace("new_numeric_", "").replace("new_categorical", "new_cat") for d in disabled)
 
 
+# =========
+# High-cardinality categorical handling
+# =========
+
+def fit_category_frequencies(
+    df: pd.DataFrame, cat_cols: list[str]
+) -> dict[str, dict[str, int]]:
+    """Count the frequency of each category value in the training data.
+
+    Args:
+        df: Training DataFrame.
+        cat_cols: List of categorical column names.
+
+    Returns:
+        A dict mapping column name -> {category_value: count}.
+    """
+    freq_maps: dict[str, dict[str, int]] = {}
+    for col in cat_cols:
+        if col in df.columns:
+            freq_maps[col] = df[col].astype("string").fillna("NA").value_counts().to_dict()
+    return freq_maps
+
+
+def apply_rare_filter(
+    df: pd.DataFrame,
+    cat_cols: list[str],
+    freq_maps: dict[str, dict[str, int]],
+    min_count: int = 3,
+) -> pd.DataFrame:
+    """Replace category values appearing fewer than *min_count* times with 'RARE'.
+
+    Args:
+        df: DataFrame to filter.
+        cat_cols: List of categorical column names.
+        freq_maps: Frequency maps from `fit_category_frequencies`.
+        min_count: Minimum occurrence threshold.
+
+    Returns:
+        DataFrame with rare categories replaced by "RARE".
+    """
+    work = df.copy()
+    for col in cat_cols:
+        if col in freq_maps and col in work.columns:
+            fmap = freq_maps[col]
+            work[col] = work[col].astype("string").fillna("NA").apply(
+                lambda x: x if fmap.get(x, 0) >= min_count else "RARE"
+            )
+    return work
+
+
 def prepare_matrix(df: pd.DataFrame, feature_set: FeatureSet | None = None):
     """Build feature matrix X and target dict y from a DataFrame.
 
@@ -241,8 +291,11 @@ def prepare_matrix(df: pd.DataFrame, feature_set: FeatureSet | None = None):
     for c in existing_num_cols:
         work[c] = pd.to_numeric(work[c], errors="coerce")
 
-    if existing_num_cols:
-        work[existing_num_cols] = work[existing_num_cols].fillna(0.0)
+    # NOTE: Intentionally NOT filling NaN with 0.0 here.
+    # CatBoost natively handles NaN values via its Min/Max Split strategy,
+    # learning the semantic difference between "missing" (e.g., first-year sire)
+    # and "zero" (e.g., sire with 100 progeny but no wins).
+    # Filling NaN with 0.0 would confuse these two distinct cases.
 
     feature_cols = existing_cat_cols + existing_num_cols
     X = work[feature_cols]

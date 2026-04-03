@@ -33,51 +33,71 @@ class Config:
             "target": "win_flag",
             "condition_col": None,
             "depth": 6, "l2_leaf_reg": 5.0, "learning_rate": 0.03, "iterations": 1000,
-            "auto_class_weights": "Balanced"
+            "auto_class_weights": "Balanced",
+            # High-cardinality regularization: limit CTR leaf count to reduce overfitting
+            # on rare categories (banusi_code, breeder_code, etc.)
+            "ctr_leaf_count_limit": 4,
         },
         "bt_place_given_win": {
             "target": "bt_place_flag",
             "condition_col": "win_flag",
             "depth": 5, "l2_leaf_reg": 10.0, "learning_rate": 0.03, "iterations": 1000,
-            "auto_class_weights": "Balanced"
+            "auto_class_weights": "Balanced",
+            "ctr_leaf_count_limit": 4,
         },
         "bt_win_given_bt_place": {
             "target": "bt_win_flag",
             "condition_col": "bt_place_flag",
             "depth": 5, "l2_leaf_reg": 12.0, "learning_rate": 0.03, "iterations": 1200,
-            "auto_class_weights": "Balanced"
+            "auto_class_weights": "Balanced",
+            "ctr_leaf_count_limit": 4,
         },
         "graded_given_bt_win": {
             "target": "graded_win_flag",
             "condition_col": "bt_win_flag",
             "depth": 4, "l2_leaf_reg": 20.0, "learning_rate": 0.02, "iterations": 1500,
-            "auto_class_weights": "Balanced"
+            "auto_class_weights": "Balanced",
+            "ctr_leaf_count_limit": 4,
         },
         "positive_prize": {
             "target": "positive_prize_flag",
             "condition_col": None,
             "depth": 6, "l2_leaf_reg": 5.0, "learning_rate": 0.03, "iterations": 1000,
-            "auto_class_weights": None
+            "auto_class_weights": None,
+            "ctr_leaf_count_limit": 4,
         },
         "prize_ge_10m": {
             "target": "pog_total_prize_ge_10m_flag",
             "condition_col": None,
             "depth": 5, "l2_leaf_reg": 10.0, "learning_rate": 0.03, "iterations": 1200,
-            "auto_class_weights": "Balanced"
+            "auto_class_weights": "Balanced",
+            "ctr_leaf_count_limit": 4,
         },
         "prize_ge_30m": {
             "target": "pog_total_prize_ge_30m_flag",
             "condition_col": None,
             "depth": 4, "l2_leaf_reg": 15.0, "learning_rate": 0.02, "iterations": 1500,
-            "auto_class_weights": "Balanced"
+            "auto_class_weights": "Balanced",
+            "ctr_leaf_count_limit": 4,
         },
         "prize_regressor": {
-            "depth": 4, "l2_leaf_reg": 20.0, "learning_rate": 0.02, "iterations": 2000
+            "depth": 4, "l2_leaf_reg": 20.0, "learning_rate": 0.02, "iterations": 2000,
+            "ctr_leaf_count_limit": 4,
         },
         "q80_regressor": {
-            "alpha": 0.8, "depth": 4, "l2_leaf_reg": 15.0, "learning_rate": 0.02, "iterations": 2000
+            "alpha": 0.8, "depth": 4, "l2_leaf_reg": 15.0, "learning_rate": 0.02, "iterations": 2000,
+            "ctr_leaf_count_limit": 4,
         },
         "q90_regressor": {
-            "alpha": 0.9, "depth": 4, "l2_leaf_reg": 15.0, "learning_rate": 0.02, "iterations": 2000
+            "alpha": 0.9, "depth": 4, "l2_leaf_reg": 15.0, "learning_rate": 0.02, "iterations": 2000,
+            "ctr_leaf_count_limit": 4,
+        },
+        # Ranking model (Learning to Rank) configuration
+        "ranking_stacking": {
+            "depth": 4, "l2_leaf_reg": 10.0, "learning_rate": 0.02, "iterations": 1000,
+            "ranking_mode": "YetiRank",
         }
     })
+
+    # High-cardinality category frequency threshold
+    high_cardinality_min_count: int = 3
