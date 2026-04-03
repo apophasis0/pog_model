@@ -1,13 +1,13 @@
 # POG 候选马潜力评估系统 (POG Candidate Evaluation Model)
 
 这是一个基于数据驱动的日本赛马（JRA）两岁马潜力评估系统，专门为 POG（Paper Owner Game）选马打造。
-该项目不以预测“终身成就”为核心，而是严格针对 POG 时间窗口（两岁 6 月至三岁 5 月）内的兑现能力、高层级比赛（尤其是重赏/G1）概率及奖金预期进行建模。
+该项目不以预测"终身成就"为核心，而是严格针对 POG 时间窗口（两岁 6 月至三岁 5 月）内的兑现能力、高层级比赛（尤其是重赏/G1）概率及奖金预期进行建模。
 
 ---
 
 ## 🏗 模型架构与设计核心
 
-整个系统摈弃了传统的平面多分类体系，转向更严谨且符合赛马逻辑的**嵌套条件概率模型 + 两部式奖金回归 + 自学权重融合** 的混合架构。
+整个系统摈弃了传统的平面多分类体系，转向更严谨且符合赛马逻辑的**嵌套条件概率模型 + 两部式奖金回归 + 自学权重融合 + 排序叠加模型** 的混合架构。
 
 ### 1. 嵌套里程碑链 (Nested Milestones)
 通过严格的因果路径约束条件概率，确保输出的逻辑一致性：
@@ -15,15 +15,19 @@ $$ P(\text{win}) \rightarrow P(\text{bt\_place} \mid \text{win}) \rightarrow P(\
 这种做法不仅保证了概率无倒挂（比如 $P(\text{graded}) \le P(\text{bt\_win})$ 必然成立），还能从历代数据中挖掘不同阶段的差异化特征。
 另外，为应对漏斗底端（如预测重赏胜）样本过于稀少导致模型失败或高方差的情况，系统引入了 `graceful_conditional` 退坡机制，在极小样本下自动使用历史基础胜率 (Base Rate Fallback) 增强鲁棒性。
 
+**概率校准**：所有二分类模型在训练后会使用 **Isotonic Regression** 在验证集上进行概率校准，确保输出的概率贴近真实分布，避免链式连乘中误差的指数级放大。
+
 ### 2. 奖金与天花板期望 (Prize & Ceiling Modelling)
-在基本的里程碑之上，补充了针对“奖金与上限”的维度：
+在基本的里程碑之上，补充了针对"奖金与上限"的维度：
 * **两部式回归：** 先预测 $P(\text{prize} > 0)$，再对正收益样本做 $\log(1+Y)$ 回归获得期望奖金。
 * **上限特化模型：** 预测 $P(prize \ge 1000万)$、$P(prize \ge 3000万)$ 以及高分位数奖金回归（Q80/Q90 模型）。
 
 ### 3. 多元综合打分 (Blended Scoring)
 模型输出多个维度的预测后，为了实战筛选，系统会计算最终的核心排名分数：
-* **`score_balanced` (均衡分)：** 注重下限与稳定性，手工固定权重并综合各个里程碑概率。
-* **`score_ceiling` (上限分 / 最新特性 🔥)：** 注重找出“真正能拿高奖金的马”。系统并未使用人工拍脑袋的超参数，而是使用 **带非负约束的回归（LinearRegression(positive=True)）** 在每次的独立**验证集**上自适应学习出各项高上限指标（包含 $3000万概率$、Q90预测、$期望奖金$ 等）的最优权重组合，并直接用于测试集。既最大化寻找暴击马的能力，同时也完全规避了训练集的穿越泄漏。
+* **`score_ceiling` (上限分)：** 找出"真正能拿高奖金的马"。系统使用 **带非负约束的线性回归（LinearRegression(positive=True)）** 在验证集上自适应学习出各项高上限指标（包含 $3000万概率$、Q90预测、$期望奖金$、$重赏概率$ 等）的最优权重组合，并直接用于测试集/新马预测。既最大化寻找暴击马的能力，同时也完全规避了训练集的穿越泄漏。
+* **`score_ranking` (排序分 🔥)：** 基于 CatBoostRanker（YetiRank / PairLogit）的 Learning-to-Rank 叠加模型。将前述一阶模型的概率与期望输出（p_win、p_bt_place、expected_pog_prize、p_prize_ge_10m/30m、Q80/Q90 等）作为元特征 (meta-features)，以同 cohort 内实际奖金排名为学习目标进行二次训练。
+  * **内存优化：** 按 birth_year 分组进行 within-cohort 排序（配合 max_group_size=300 上限内采样），将 O(n²) 成对比较降低约 20 倍，大幅减少内存需求。
+  * **自动降级：** 如果 YetiRank 仍然触发 OOM，系统自动回退到 PairLogit 模式，保证训练流程不中断。
 
 ---
 
@@ -48,10 +52,16 @@ $$ P(\text{win}) \rightarrow P(\text{bt\_place} \mid \text{win}) \rightarrow P(\
 最新的代码结构已被重新经过模块化构筑重构：
 
 ### 核心支持模块
-* **`src/config.py`**：核心基础数据库与路径配置文件。
+* **`src/config.py`**：核心基础数据库与路径配置，包含全部模型的超参数（深度、L2、学习率），以及 Ranking 模型的内存限制 (`max_group_size`) 与降级策略 (`fallback_ranking_mode`)。
 * **`src/data.py`**：处理训练用底层数据的拉取与有效 Label Cohort 状态管理。
-* **`src/features.py`**：详尽确立了 `FeatureSet` 特征群组件元数据与动态配置，处理基础特征矩阵 `Pool` 构建与缺失值清洗。
-* **`src/pipeline.py`**：所有训练与评估逻辑的中枢。提供了 `train_all_models` 标准流、并管理强大的统一模型簇对象 `ModelBundle` 的本地序列化存储与推断加载功能。
+* **`src/features.py`**：详尽确立了 `FeatureSet` 特征群组件元数据与动态配置，处理基础特征矩阵 `Pool` 构建与缺失值清洗；支持高基数类别频率过滤（`fit_category_frequencies` + `apply_rare_filter`）。
+* **`src/pipeline.py`**：所有训练与评估逻辑的中枢。提供：
+  * `train_all_models` — 一键训练全量模型簇
+  * `predict_all` — 一键生成全维度预测
+  * `predict_ranking` — Ranking 分数生成
+  * `build_blended_scores` — 综合分数融合
+  * `train_and_evaluate` — 训练+评估完整流水线
+  * `ModelBundle` — 统一模型簇对象，管理本地序列化存储与推断加载
 * **`src/eval.py`**：针对各类分类与回归的 Metric 评估系统。
 
 ### 任务脚本与工具流
@@ -94,6 +104,5 @@ uv run python src/analyze_features.py --model-dir models_recommended --years 202
 ---
 
 ## 🎯 优先改进规划 (Next Steps)
-1. 对输出概率进一步做 Platt Scaling 或 Isotonic 校准，使里程碑中产生的预测概率严格贴切实战的真实赔率与兑现意义。
-2. 考虑针对父系/外祖父/练马师加入更加丰富的“主被动协同靶向惩罚”或赛道相性分析。
-3. 建立可视化界面的 UI 与预测查询数据库系统。
+1. 考虑针对父系/外祖父/练马师加入更加丰富的"主被动协同靶向惩罚"或赛道相性分析。
+2. 建立可视化界面的 UI 与预测查询数据库系统。

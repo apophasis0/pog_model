@@ -21,6 +21,7 @@ from features import FeatureSet, prepare_matrix
 from pipeline import (
     ModelBundle,
     predict_all,
+    predict_ranking,
     build_blended_scores,
     build_topk_report,
 )
@@ -43,6 +44,8 @@ def load_bundle(model_dir: str) -> ModelBundle:
         # joblib may serialize None as-is
         return obj if obj is not None else None
 
+    ranking_model = _load("ranking_model.joblib") if meta.get("has_ranking_model", False) else None
+
     return ModelBundle(
         win_model=_load("win_model.joblib"),
         bt_place_given_win_model=_load("bt_place_given_win_model.joblib"),
@@ -54,6 +57,7 @@ def load_bundle(model_dir: str) -> ModelBundle:
         prize_ge_30m_model=_load("prize_ge_30m_model.joblib"),
         q80_model=_load("q80_model.joblib"),
         q90_model=_load("q90_model.joblib"),
+        ranking_model=ranking_model,
         ceiling_weights=ceiling_weights,
         feature_set=feature_set,
     )
@@ -95,9 +99,22 @@ def score_cohort(bundle: ModelBundle, cohort_df: pd.DataFrame) -> pd.DataFrame:
     for col in pred_cols.columns:
         result[col] = pred_cols[col].values
 
-    result = build_blended_scores(result, ceiling_weights=bundle.ceiling_weights)
+    # Ranking scores
+    ranking_scores = predict_ranking(bundle, cohort_df) if bundle.ranking_model is not None else None
 
-    return result.sort_values("score_balanced", ascending=False).reset_index(drop=True)
+    result = build_blended_scores(
+        result,
+        ceiling_weights=bundle.ceiling_weights,
+        ranking_scores=ranking_scores,
+    )
+
+    # Sort by available score priority
+    if "score_ranking" in result.columns:
+        return result.sort_values("score_ranking", ascending=False).reset_index(drop=True)
+    elif "score_ceiling" in result.columns:
+        return result.sort_values("score_ceiling", ascending=False).reset_index(drop=True)
+    else:
+        return result.sort_values("expected_pog_prize", ascending=False).reset_index(drop=True)
 
 
 def main():
@@ -136,6 +153,7 @@ def main():
     bundle = load_bundle(args.model_dir)
     print(f"Feature set: {bundle.feature_set}")
     print(f"Ceiling weights: {bundle.ceiling_weights}")
+    print(f"Has ranking model: {bundle.ranking_model is not None}")
 
     all_preds = []
 
@@ -167,12 +185,12 @@ def main():
                 "p_win", "p_bt_place", "p_bt_win", "p_graded_win",
                 "p_prize_ge_10m", "p_prize_ge_30m",
                 "q90_prize", "expected_pog_prize",
-                "score_balanced", "score_ceiling",
+                "score_ceiling", "score_ranking",
             ]
             if c in pred.columns
         ]
 
-        for score_col in ["score_balanced", "score_ceiling", "p_graded_win"]:
+        for score_col in ["score_ceiling", "score_ranking", "p_graded_win"]:
             if score_col not in pred.columns:
                 continue
             for k in args.top_k:

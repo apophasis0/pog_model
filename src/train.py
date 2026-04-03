@@ -16,6 +16,7 @@ from eval import evaluate_binary, evaluate_regression
 from pipeline import (
     train_all_models,
     predict_all,
+    predict_ranking,
     build_blended_scores,
     build_topk_report,
     print_metrics,
@@ -186,7 +187,14 @@ def main():
     for col in pred_cols.columns:
         test_pred[col] = pred_cols[col].values
 
-    test_pred = build_blended_scores(test_pred, ceiling_weights=bundle.ceiling_weights)
+    # Ranking scores
+    ranking_scores = predict_ranking(bundle, test_df, train_df=train_df) if bundle.ranking_model is not None else None
+
+    test_pred = build_blended_scores(
+        test_pred,
+        ceiling_weights=bundle.ceiling_weights,
+        ranking_scores=ranking_scores,
+    )
 
     # -------------------------
     # Metrics
@@ -286,9 +294,8 @@ def main():
         "p_prize_ge_10m",
         "p_prize_ge_30m",
         "q90_prize",
-        "score_balanced",
         "score_ceiling",
-        "score_ceiling_old",
+        "score_ranking",
     ]
     ks = [20, 50, 100]
 
@@ -326,14 +333,26 @@ def main():
     for col in current_pred_cols.columns:
         current_pred[col] = current_pred_cols[col].values
 
-    current_pred = build_blended_scores(current_pred, ceiling_weights=bundle.ceiling_weights)
+    # Ranking scores for current cohort
+    current_ranking_scores = predict_ranking(bundle, score_df) if bundle.ranking_model is not None else None
+
+    current_pred = build_blended_scores(
+        current_pred,
+        ceiling_weights=bundle.ceiling_weights,
+        ranking_scores=current_ranking_scores,
+    )
 
     current_pred["model_name"] = cfg.model_name
     current_pred["model_version"] = cfg.model_version
     current_pred["asof_date"] = pd.to_datetime(cfg.asof_date)
 
     # 排序输出
-    current_pred = current_pred.sort_values("score_balanced", ascending=False).reset_index(drop=True)
+    if "score_ranking" in current_pred.columns:
+        current_pred = current_pred.sort_values("score_ranking", ascending=False).reset_index(drop=True)
+    elif "score_ceiling" in current_pred.columns:
+        current_pred = current_pred.sort_values("score_ceiling", ascending=False).reset_index(drop=True)
+    else:
+        current_pred = current_pred.sort_values("expected_pog_prize", ascending=False).reset_index(drop=True)
     current_pred.to_csv("outputs/current_cohort_predictions_nested.csv", index=False)
 
     # 存入数据库
@@ -376,19 +395,20 @@ def main():
             "p_prize_ge_30m",
             "q90_prize",
             "expected_pog_prize",
-            "score_balanced",
             "score_ceiling",
-            "score_ceiling_old",
+            "score_ranking",
         ]
         if c in current_pred.columns
     ]
 
-    current_pred.sort_values("score_balanced", ascending=False).head(100)[shortlist_cols].to_csv(
-        "outputs/current_top100_balanced.csv", index=False
-    )
-    current_pred.sort_values("score_ceiling", ascending=False).head(100)[shortlist_cols].to_csv(
-        "outputs/current_top100_ceiling.csv", index=False
-    )
+    if "score_ranking" in current_pred.columns:
+        current_pred.sort_values("score_ranking", ascending=False).head(100)[shortlist_cols].to_csv(
+            "outputs/current_top100_ranking.csv", index=False
+        )
+    if "score_ceiling" in current_pred.columns:
+        current_pred.sort_values("score_ceiling", ascending=False).head(100)[shortlist_cols].to_csv(
+            "outputs/current_top100_ceiling.csv", index=False
+        )
     current_pred.sort_values("p_graded_win", ascending=False).head(100)[shortlist_cols].to_csv(
         "outputs/current_top100_graded_win.csv", index=False
     )
@@ -399,8 +419,10 @@ def main():
     print("- outputs/topk_backtest_report.csv")
     print("- outputs/test_predictions_nested.csv")
     print("- outputs/current_cohort_predictions_nested.csv")
-    print("- outputs/current_top100_balanced.csv")
-    print("- outputs/current_top100_ceiling.csv")
+    if "score_ranking" in current_pred.columns:
+        print("- outputs/current_top100_ranking.csv")
+    if "score_ceiling" in current_pred.columns:
+        print("- outputs/current_top100_ceiling.csv")
     print("- outputs/current_top100_graded_win.csv")
 
 

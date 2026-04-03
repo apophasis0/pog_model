@@ -236,6 +236,48 @@ def predict_regressor(model, df, feature_set: FeatureSet):
     return pred_log
 
 
+def _subsample_groups(
+    X: pd.DataFrame,
+    y: np.ndarray,
+    group_ids: np.ndarray,
+    max_group_size: int,
+    rng: np.random.Generator | None = None,
+) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
+    """Down-sample each group to at most *max_group_size* members.
+
+    Within each group the ranking labels are recomputed so that they
+    remain dense (1 … n) without holes.
+    """
+    if max_group_size <= 0:
+        return X, y, group_ids
+
+    if rng is None:
+        rng = np.random.default_rng(42)
+
+    keep_idx: list[int] = []
+    for gid in np.unique(group_ids):
+        g_mask = np.where(group_ids == gid)[0]
+        if len(g_mask) <= max_group_size:
+            keep_idx.extend(g_mask.tolist())
+        else:
+            keep_idx.extend(rng.choice(g_mask, size=max_group_size, replace=False).tolist())
+
+    keep_idx.sort()
+    X_out = X.iloc[keep_idx].reset_index(drop=True)
+    group_out = group_ids[keep_idx]
+
+    # Re-rank within each group so labels are dense
+    y_out = np.empty(len(keep_idx), dtype=float)
+    for gid in np.unique(group_out):
+        g_mask = np.where(group_out == gid)[0]
+        original_prizes = y[np.array(keep_idx)[g_mask]]
+        # Rank: higher prize → lower rank number (= better)
+        from scipy.stats import rankdata
+        y_out[g_mask] = rankdata(-original_prizes, method="average")
+
+    return X_out, y_out, group_out
+
+
 def train_ranking_stacking_model(
     train_df: pd.DataFrame,
     valid_df: pd.DataFrame,
@@ -244,16 +286,29 @@ def train_ranking_stacking_model(
     depth: int = 4,
     l2_leaf_reg: float = 10.0,
     learning_rate: float = 0.02,
-    iterations: int = 1000,
+    iterations: int = 500,
     ranking_mode: str = "YetiRank",
+    max_group_size: int = 300,
+    fallback_ranking_mode: str = "PairLogit",
 ) -> CatBoostRanker | None:
     """Train a CatBoostRanker (YetiRank/PairLogit) as a stacking model.
 
     Uses the first-stage model outputs (p_win, p_bt_place, etc.) as meta-features.
-    The target is the rank of pog_total_prize among all horses.
+    The target is the within-cohort rank of pog_total_prize.
+
+    Memory-efficiency notes:
+      - group_id is set to birth_year so that pairwise comparisons happen
+        only within each cohort (~200-500 horses) rather than across the
+        entire dataset (~5000+). This reduces O(n²) memory by ~10-20×.
+      - max_group_size caps each group via random subsampling for extra
+        safety on very large cohorts.
+      - If YetiRank still causes OOM, the caller automatically retries
+        with fallback_ranking_mode (PairLogit).
 
     Returns None if there is not enough data to train.
     """
+    import gc
+
     # Need first-stage models to produce meta-features
     if bundle is None:
         print("[WARN] No bundle provided for ranking stacking model. Skipping.")
@@ -279,15 +334,60 @@ def train_ranking_stacking_model(
     ]
     available_features = [f for f in ranking_features if f in train_meta.columns]
 
-    X_train = train_meta[available_features]
-    y_train_rank = train_pos["pog_total_prize"].rank(method="average", ascending=False).values.astype(int)
+    X_train_raw = train_meta[available_features]
+    X_valid_raw = valid_meta[available_features]
 
-    X_valid = valid_meta[available_features]
-    y_valid_rank = valid_pos["pog_total_prize"].rank(method="average", ascending=False).values.astype(int)
+    # Use birth_year as group_id for within-cohort ranking.
+    # This is both semantically correct (POG = same birth-year competition)
+    # and dramatically reduces memory (pairwise comparisons are per-group).
+    train_group_id = train_pos["birth_year"].values.astype(int)
+    valid_group_id = valid_pos["birth_year"].values.astype(int)
 
-    # Create group IDs (all 1 group per dataset for global ranking)
-    train_group_id = np.zeros(len(X_train), dtype=int)
-    valid_group_id = np.zeros(len(X_valid), dtype=int)
+    # Rank targets within each birth_year group
+    train_prizes = train_pos["pog_total_prize"].values.astype(float)
+    valid_prizes = valid_pos["pog_total_prize"].values.astype(float)
+
+    # Apply max_group_size subsampling to further control memory
+    if max_group_size and max_group_size > 0:
+        X_train, y_train_rank, train_group_id = _subsample_groups(
+            X_train_raw, train_prizes, train_group_id, max_group_size
+        )
+        X_valid, y_valid_rank, valid_group_id = _subsample_groups(
+            X_valid_raw, valid_prizes, valid_group_id, max_group_size
+        )
+    else:
+        X_train = X_train_raw
+        X_valid = X_valid_raw
+        # Rank within each group
+        from scipy.stats import rankdata
+        y_train_rank = np.empty(len(X_train), dtype=float)
+        for gid in np.unique(train_group_id):
+            mask = train_group_id == gid
+            y_train_rank[mask] = rankdata(-train_prizes[mask], method="average")
+        y_valid_rank = np.empty(len(X_valid), dtype=float)
+        for gid in np.unique(valid_group_id):
+            mask = valid_group_id == gid
+            y_valid_rank[mask] = rankdata(-valid_prizes[mask], method="average")
+
+    # Free temporary meta-feature DataFrames
+    del train_meta, valid_meta, X_train_raw, X_valid_raw
+    gc.collect()
+
+    n_train_groups = len(np.unique(train_group_id))
+    n_valid_groups = len(np.unique(valid_group_id))
+    print(f"Ranking data: train={len(X_train)} samples in {n_train_groups} groups, "
+          f"valid={len(X_valid)} samples in {n_valid_groups} groups")
+
+    # CatBoost Ranker requires group_id to be sorted and contiguous.
+    train_order = np.argsort(train_group_id, kind="stable")
+    X_train = X_train.iloc[train_order].reset_index(drop=True)
+    y_train_rank = y_train_rank[train_order]
+    train_group_id = train_group_id[train_order]
+
+    valid_order = np.argsort(valid_group_id, kind="stable")
+    X_valid = X_valid.iloc[valid_order].reset_index(drop=True)
+    y_valid_rank = y_valid_rank[valid_order]
+    valid_group_id = valid_group_id[valid_order]
 
     train_pool = Pool(
         X_train, label=y_train_rank, group_id=train_group_id
@@ -311,11 +411,39 @@ def train_ranking_stacking_model(
         od_wait=100,
     )
 
-    ranking_model.fit(
-        train_pool,
-        eval_set=valid_pool,
-        use_best_model=True,
-    )
+    try:
+        ranking_model.fit(
+            train_pool,
+            eval_set=valid_pool,
+            use_best_model=True,
+        )
+    except (MemoryError, Exception) as e:
+        err_msg = str(e).lower()
+        is_oom = isinstance(e, MemoryError) or "memory" in err_msg or "alloc" in err_msg
+        if is_oom and ranking_mode != fallback_ranking_mode:
+            print(f"[WARN] {ranking_mode} OOM: {e}")
+            print(f"[WARN] Retrying with fallback mode: {fallback_ranking_mode}")
+            gc.collect()
+
+            ranking_model = CatBoostRanker(
+                loss_function=fallback_ranking_mode,
+                eval_metric="NDCG",
+                iterations=iterations,
+                learning_rate=learning_rate,
+                depth=depth,
+                l2_leaf_reg=l2_leaf_reg,
+                random_seed=42,
+                verbose=100,
+                od_type="Iter",
+                od_wait=100,
+            )
+            ranking_model.fit(
+                train_pool,
+                eval_set=valid_pool,
+                use_best_model=True,
+            )
+        else:
+            raise
 
     return ranking_model
 
@@ -434,7 +562,17 @@ def fit_ceiling_weights(df: pd.DataFrame) -> dict:
     return dict(zip(features, w))
 
 
-def build_blended_scores(df: pd.DataFrame, ceiling_weights: dict | None = None) -> pd.DataFrame:
+def build_blended_scores(
+    df: pd.DataFrame,
+    ceiling_weights: dict | None = None,
+    ranking_scores: np.ndarray | None = None,
+) -> pd.DataFrame:
+    """Build composite scores for ranking horses.
+
+    Only produces:
+    - score_ceiling: if ceiling_weights is non-empty (learned via linear regression)
+    - score_ranking: if ranking_scores is provided (from CatBoostRanker)
+    """
     out = df.copy()
 
     out["r_expected_pog_prize"] = rank_to_unit_interval(out["expected_pog_prize"])
@@ -443,47 +581,24 @@ def build_blended_scores(df: pd.DataFrame, ceiling_weights: dict | None = None) 
     out["r_p_bt_win"] = rank_to_unit_interval(out["p_bt_win"])
     out["r_p_graded_win"] = rank_to_unit_interval(out["p_graded_win"])
 
-    # 偏稳健：兼顾均值与层级里程碑
-    out["score_balanced"] = (
-        0.45 * out["r_expected_pog_prize"]
-        + 0.20 * out["r_p_bt_place"]
-        + 0.20 * out["r_p_bt_win"]
-        + 0.15 * out["r_p_graded_win"]
-    )
+    # score_ceiling: only if learned weights exist
+    if ceiling_weights:
+        has_ceiling = all(
+            c in out.columns
+            for c in ["p_prize_ge_10m", "p_prize_ge_30m", "q90_prize"]
+        )
+        if has_ceiling:
+            out["r_p_prize_ge_10m"] = rank_to_unit_interval(out["p_prize_ge_10m"])
+            out["r_p_prize_ge_30m"] = rank_to_unit_interval(out["p_prize_ge_30m"])
+            out["r_q90_prize"] = rank_to_unit_interval(out["q90_prize"])
 
-    # 旧版 ceiling（保留供对比）
-    out["score_ceiling_old"] = (
-        0.25 * out["r_expected_pog_prize"]
-        + 0.15 * out["r_p_win"]
-        + 0.20 * out["r_p_bt_place"]
-        + 0.20 * out["r_p_bt_win"]
-        + 0.20 * out["r_p_graded_win"]
-    )
-
-    # 新版 ceiling：以 ceiling 专用信号为核心
-    has_ceiling = all(
-        c in out.columns
-        for c in ["p_prize_ge_10m", "p_prize_ge_30m", "q90_prize"]
-    )
-    if has_ceiling:
-        out["r_p_prize_ge_10m"] = rank_to_unit_interval(out["p_prize_ge_10m"])
-        out["r_p_prize_ge_30m"] = rank_to_unit_interval(out["p_prize_ge_30m"])
-        out["r_q90_prize"] = rank_to_unit_interval(out["q90_prize"])
-
-        if ceiling_weights:
             out["score_ceiling"] = 0.0
             for feat, w in ceiling_weights.items():
                 out["score_ceiling"] += w * out[feat]
-        else:
-            out["score_ceiling"] = (
-                0.30 * out["r_p_prize_ge_10m"]
-                + 0.25 * out["r_p_prize_ge_30m"]
-                + 0.20 * out["r_p_graded_win"]
-                + 0.15 * out["r_q90_prize"]
-                + 0.10 * out["r_expected_pog_prize"]
-            )
-    else:
-        out["score_ceiling"] = out["score_ceiling_old"]
+
+    # score_ranking: from CatBoostRanker (YetiRank)
+    if ranking_scores is not None and len(ranking_scores) == len(out):
+        out["score_ranking"] = ranking_scores
 
     return out
 
@@ -628,6 +743,7 @@ def train_all_models(
         models[key] = train_binary_stage_model(
             train_df, valid_df, feature_set=feature_set, **mc[key]
         )
+        #gc.collect()  # Free memory between models
 
     # Category 2: Conditional Binary Stage Models
     conditional_keys = [
@@ -650,6 +766,7 @@ def train_all_models(
             models[key] = train_binary_stage_model(
                 train_df, valid_df, feature_set=feature_set, **mc[key]
             )
+        #gc.collect()  # Free memory between models
 
     # Category 3: Regressor Models
     print("\n=== TRAIN REGRESSOR MODELS ===")
@@ -657,30 +774,52 @@ def train_all_models(
     prize_model = train_positive_regressor(
         train_df, valid_df, feature_set=feature_set, **mc["prize_regressor"]
     )
+    #gc.collect()
     
     print("Training q80_model...")
     q80_model = train_quantile_regressor(
         train_df, valid_df, feature_set=feature_set, **mc["q80_regressor"]
     )
+    #gc.collect()
     
     print("Training q90_model...")
     q90_model = train_quantile_regressor(
         train_df, valid_df, feature_set=feature_set, **mc["q90_regressor"]
     )
+    #gc.collect()
 
     # Category 4: Ranking Stacking Model (optional, graceful failure)
     print("\n=== TRAIN RANKING STACKING MODEL ===")
     ranking_model = None
     if "ranking_stacking" in mc:
+        # Build a temporary bundle with all trained models for ranking meta-features
+        temp_bundle = ModelBundle(
+            win_model=models["win"],
+            bt_place_given_win_model=models["bt_place_given_win"],
+            bt_win_given_bt_place_model=models["bt_win_given_bt_place"],
+            graded_given_bt_win_model=models["graded_given_bt_win"],
+            positive_prize_model=models["positive_prize"],
+            prize_model=prize_model,
+            prize_ge_10m_model=models["prize_ge_10m"],
+            prize_ge_30m_model=models["prize_ge_30m"],
+            q80_model=q80_model,
+            q90_model=q90_model,
+            ranking_model=None,
+            ceiling_weights={},
+            feature_set=feature_set,
+        )
         try:
             ranking_cfg = mc["ranking_stacking"]
             ranking_model = train_ranking_stacking_model(
                 train_df, valid_df, feature_set=feature_set,
+                bundle=temp_bundle,
                 depth=ranking_cfg.get("depth", 4),
                 l2_leaf_reg=ranking_cfg.get("l2_leaf_reg", 10.0),
                 learning_rate=ranking_cfg.get("learning_rate", 0.02),
-                iterations=ranking_cfg.get("iterations", 1000),
+                iterations=ranking_cfg.get("iterations", 500),
                 ranking_mode=ranking_cfg.get("ranking_mode", "YetiRank"),
+                max_group_size=ranking_cfg.get("max_group_size", 300),
+                fallback_ranking_mode=ranking_cfg.get("fallback_ranking_mode", "PairLogit"),
             )
             if ranking_model is not None:
                 print("Ranking stacking model trained successfully.")
@@ -888,7 +1027,14 @@ def train_and_evaluate(
     for col in pred_cols.columns:
         test_pred[col] = pred_cols[col].values
 
-    test_pred = build_blended_scores(test_pred, ceiling_weights=bundle.ceiling_weights)
+    # Ranking scores
+    ranking_scores = predict_ranking(bundle, test_df, train_df=train_df) if bundle.ranking_model is not None else None
+
+    test_pred = build_blended_scores(
+        test_pred,
+        ceiling_weights=bundle.ceiling_weights,
+        ranking_scores=ranking_scores,
+    )
 
     # Top-k report
     topk = build_topk_report(test_pred, score_cols=score_cols, ks=ks)

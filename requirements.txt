@@ -3,6 +3,7 @@ numpy
 sqlalchemy
 psycopg2-binary
 scikit-learn
+scipy
 catboost
 joblib
 pyyaml

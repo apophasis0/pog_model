@@ -170,9 +170,8 @@ def main():
         "p_prize_ge_10m",
         "p_prize_ge_30m",
         "q90_prize",
-        "score_balanced",
         "score_ceiling",
-        "score_ceiling_old",
+        "score_ranking",
     ]
     ks = [20, 50, 100]
 
@@ -214,7 +213,7 @@ def main():
     print(metrics_df.to_string(index=False))
 
     print("\n--- Top-k Summary (mean across folds) ---")
-    key_scores = ["score_balanced", "score_ceiling", "score_ceiling_old", "p_bt_win"]
+    key_scores = ["score_ceiling", "score_ranking", "p_bt_win"]
     key_summary = summary_df[summary_df["score_col"].isin(key_scores)].copy()
     display_cols = [c for c in [
         "score_col", "k", "n_folds",

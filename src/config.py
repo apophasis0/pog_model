@@ -94,8 +94,13 @@ class Config:
         },
         # Ranking model (Learning to Rank) configuration
         "ranking_stacking": {
-            "depth": 4, "l2_leaf_reg": 10.0, "learning_rate": 0.02, "iterations": 1000,
+            "depth": 4, "l2_leaf_reg": 10.0, "learning_rate": 0.02, "iterations": 500,
             "ranking_mode": "YetiRank",
+            # Maximum samples per group (birth_year) to control memory usage.
+            # Set to 0 or None to disable subsampling within groups.
+            "max_group_size": 300,
+            # If YetiRank OOMs, auto-fallback to PairLogit (more memory-efficient)
+            "fallback_ranking_mode": "PairLogit",
         }
     })
 
