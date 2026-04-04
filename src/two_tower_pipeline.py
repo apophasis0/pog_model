@@ -19,10 +19,10 @@ from catboost import CatBoostClassifier, CatBoostRegressor, CatBoostRanker, Pool
 from sklearn.linear_model import LinearRegression
 from sklearn.isotonic import IsotonicRegression
 
-from features import (
+from .features import (
     FeatureSet, prepare_matrix, add_log_target,
 )
-from two_tower_config import TwoTowerConfig
+from .two_tower_config import TwoTowerConfig
 
 
 # =========================

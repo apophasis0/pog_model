@@ -9,16 +9,16 @@ import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 
-from two_tower_config import TwoTowerConfig
-from data import (
+from .two_tower_config import TwoTowerConfig
+from .data import (
     load_training_frame,
     load_scoring_frame,
     save_predictions,
     load_completed_birth_years,
 )
-from features import FeatureSet
-from eval import evaluate_binary, evaluate_regression
-from two_tower_pipeline import (
+from .features import FeatureSet
+from .eval import evaluate_binary, evaluate_regression
+from .two_tower_pipeline import (
     train_two_tower_models,
     predict_all,
     build_blended_scores,

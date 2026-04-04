@@ -1,6 +1,6 @@
 import pandas as pd
 from sqlalchemy import create_engine, text
-from config import Config
+from .config import Config
 from typing import Protocol
 
 class HasDbUrl(Protocol):
