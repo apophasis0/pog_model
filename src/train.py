@@ -4,16 +4,15 @@ import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 
-from config import Config
-from data import (
+from pog_model.config import Config
+from pog_model.data import (
     load_training_frame,
     load_scoring_frame,
     save_predictions,
-    load_completed_birth_years,
 )
-from features import FeatureSet
-from eval import evaluate_binary, evaluate_regression
-from pipeline import (
+from pog_model.features import FeatureSet
+from pog_model.eval import evaluate_binary, evaluate_regression
+from pog_model.pipeline import (
     train_all_models,
     predict_all,
     predict_ranking,
@@ -22,67 +21,11 @@ from pipeline import (
     print_metrics,
     save_bundle,
 )
-
-
-# =========================
-# Split helpers
-# =========================
-
-def auto_configure_splits(cfg: Config) -> Config:
-    completed_years = load_completed_birth_years(cfg)
-
-    if len(completed_years) < 5:
-        raise ValueError(
-            f"已完成标签的 birth_year 太少：{completed_years}。至少需要 5 个完整 cohort。"
-        )
-
-    # 用最后 1 年做 test，倒数第 2 年做 valid，其余做 train
-    cfg.test_birth_year_start = completed_years[-1]
-    cfg.test_birth_year_end = completed_years[-1]
-
-    cfg.valid_birth_year_start = completed_years[-2]
-    cfg.valid_birth_year_end = completed_years[-2]
-
-    cfg.train_birth_year_start = completed_years[0]
-    cfg.train_birth_year_end = completed_years[-3]
-
-    return cfg
-
-
-def split_by_birth_year(df: pd.DataFrame, cfg: Config):
-    train_df = df[
-        (df["birth_year"] >= cfg.train_birth_year_start) &
-        (df["birth_year"] <= cfg.train_birth_year_end)
-    ].copy()
-
-    valid_df = df[
-        (df["birth_year"] >= cfg.valid_birth_year_start) &
-        (df["birth_year"] <= cfg.valid_birth_year_end)
-    ].copy()
-
-    test_df = df[
-        (df["birth_year"] >= cfg.test_birth_year_start) &
-        (df["birth_year"] <= cfg.test_birth_year_end)
-    ].copy()
-
-    return train_df, valid_df, test_df
-
-
-def describe_split(name: str, df: pd.DataFrame):
-    n = len(df)
-    pos_prize = int((df["pog_total_prize"] > 0).sum()) if "pog_total_prize" in df.columns else 0
-    win_n = int(df["win_flag"].sum()) if "win_flag" in df.columns else 0
-    bt_place_n = int(df["bt_place_flag"].sum()) if "bt_place_flag" in df.columns else 0
-    bt_win_n = int(df["bt_win_flag"].sum()) if "bt_win_flag" in df.columns else 0
-    graded_n = int(df["graded_win_flag"].sum()) if "graded_win_flag" in df.columns else 0
-
-    print(
-        f"[{name}] n={n}, positive_prize={pos_prize}, "
-        f"win={win_n}, bt_place={bt_place_n}, bt_win={bt_win_n}, graded_win={graded_n}"
-    )
-
-    if n == 0:
-        raise ValueError(f"{name} split 为空，请检查年份切分。")
+from pog_model.split import (
+    auto_configure_splits,
+    split_by_birth_year,
+    describe_split,
+)
 
 
 # =========================

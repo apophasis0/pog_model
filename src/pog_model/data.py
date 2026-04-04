@@ -1,7 +1,7 @@
 import pandas as pd
 from sqlalchemy import create_engine, text
-from .config import Config
 from typing import Protocol
+from .config import Config
 
 class HasDbUrl(Protocol):
     """Protocol for config objects that have db_url attribute."""
@@ -134,3 +134,18 @@ def save_predictions(cfg: HasDbUrl, pred_df: pd.DataFrame):
         method="multi",
         chunksize=1000,
     )
+
+
+def load_cohort_frame(cfg: HasDbUrl, birth_year: int) -> pd.DataFrame:
+    """Load static features for a single birth year cohort (no label required)."""
+    sql = text(f"""
+    select *
+    from {STATIC_FEATURE_VIEW}
+    where birth_year = :birth_year
+      and is_jra_registered = true
+    """)
+    engine = get_engine(cfg)
+    with engine.connect() as conn:
+        df = pd.read_sql(sql, conn, params={"birth_year": birth_year})
+    print(f"[load] birth_year={birth_year}, n={len(df)}")
+    return df

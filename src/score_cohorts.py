@@ -16,66 +16,17 @@ import pandas as pd
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
-from config import Config
-from features import FeatureSet, prepare_matrix
-from pipeline import (
+from pog_model.config import Config
+from pog_model.features import FeatureSet, prepare_matrix
+from pog_model.pipeline import (
     ModelBundle,
     predict_all,
     predict_ranking,
     build_blended_scores,
     build_topk_report,
+    load_bundle,
 )
-
-
-STATIC_FEATURE_VIEW = "pog.mv_static_features_v2"
-
-
-def load_bundle(model_dir: str) -> ModelBundle:
-    """Deserialize a ModelBundle from disk."""
-    with open(os.path.join(model_dir, "model_bundle_meta.json"), "r", encoding="utf-8") as f:
-        meta = json.load(f)
-
-    feature_set = FeatureSet(**meta["feature_set"])
-    ceiling_weights = meta.get("ceiling_weights", {})
-
-    def _load(name):
-        path = os.path.join(model_dir, name)
-        obj = joblib.load(path)
-        # joblib may serialize None as-is
-        return obj if obj is not None else None
-
-    ranking_model = _load("ranking_model.joblib") if meta.get("has_ranking_model", False) else None
-
-    return ModelBundle(
-        win_model=_load("win_model.joblib"),
-        bt_place_given_win_model=_load("bt_place_given_win_model.joblib"),
-        bt_win_given_bt_place_model=_load("bt_win_given_bt_place_model.joblib"),
-        graded_given_bt_win_model=_load("graded_given_bt_win_model.joblib"),
-        positive_prize_model=_load("positive_prize_model.joblib"),
-        prize_model=_load("prize_model.joblib"),
-        prize_ge_10m_model=_load("prize_ge_10m_model.joblib"),
-        prize_ge_30m_model=_load("prize_ge_30m_model.joblib"),
-        q80_model=_load("q80_model.joblib"),
-        q90_model=_load("q90_model.joblib"),
-        ranking_model=ranking_model,
-        ceiling_weights=ceiling_weights,
-        feature_set=feature_set,
-    )
-
-
-def load_cohort_frame(cfg: Config, birth_year: int) -> pd.DataFrame:
-    """Load static features for a single birth year cohort (no label required)."""
-    sql = text(f"""
-    select *
-    from {STATIC_FEATURE_VIEW}
-    where birth_year = :birth_year
-      and is_jra_registered = true
-    """)
-    engine = create_engine(cfg.db_url)
-    with engine.connect() as conn:
-        df = pd.read_sql(sql, conn, params={"birth_year": birth_year})
-    print(f"[load] birth_year={birth_year}, n={len(df)}")
-    return df
+from pog_model.data import load_cohort_frame
 
 
 def score_cohort(bundle: ModelBundle, cohort_df: pd.DataFrame) -> pd.DataFrame:

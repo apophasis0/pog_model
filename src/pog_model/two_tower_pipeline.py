@@ -654,3 +654,44 @@ def save_bundle(bundle: TwoTowerBundle, path: str, meta_extra: dict | None = Non
 
     with open(os.path.join(path, "two_tower_meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
+
+
+def load_bundle(path: str, feature_set: FeatureSet | None = None) -> TwoTowerBundle:
+    """加载模型包。"""
+    # 下限塔
+    win_model = joblib.load(os.path.join(path, "win_model.joblib"))
+    positive_prize_model = joblib.load(os.path.join(path, "positive_prize_model.joblib"))
+    
+    # 上限塔
+    graded_win_direct_model = joblib.load(os.path.join(path, "graded_win_direct_model.joblib"))
+    prize_ge_30m_direct_model = joblib.load(os.path.join(path, "prize_ge_30m_direct_model.joblib"))
+    
+    # 回归器
+    prize_model = joblib.load(os.path.join(path, "prize_model.joblib"))
+    q90_model = joblib.load(os.path.join(path, "q90_model.joblib"))
+    
+    # 融合层
+    ranking_model_path = os.path.join(path, "ranking_model.joblib")
+    ranking_model = joblib.load(ranking_model_path) if os.path.exists(ranking_model_path) else None
+
+    # 元数据
+    meta_path = os.path.join(path, "two_tower_meta.json")
+    if os.path.exists(meta_path):
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        if feature_set is None and "feature_set" in meta:
+            feature_set = FeatureSet(**meta["feature_set"])
+
+    if feature_set is None:
+        feature_set = FeatureSet()
+
+    return TwoTowerBundle(
+        win_model=win_model,
+        positive_prize_model=positive_prize_model,
+        graded_win_direct_model=graded_win_direct_model,
+        prize_ge_30m_direct_model=prize_ge_30m_direct_model,
+        prize_model=prize_model,
+        q90_model=q90_model,
+        ranking_model=ranking_model,
+        feature_set=feature_set,
+    )

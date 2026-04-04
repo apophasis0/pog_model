@@ -1028,7 +1028,7 @@ def train_and_evaluate(
     Returns:
         (topk_report_df, metrics_dict, test_pred_df)
     """
-    from eval import evaluate_binary
+    from .eval import evaluate_binary
 
     bundle = train_all_models(train_df, valid_df, feature_set, graceful_conditional=graceful_conditional)
 
@@ -1106,3 +1106,29 @@ def save_bundle(bundle: ModelBundle, path: str, meta_extra: dict | None = None):
 
     with open(os.path.join(path, "model_bundle_meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
+
+
+def load_bundle(path: str) -> ModelBundle:
+    """Load all models and metadata from a directory."""
+    with open(os.path.join(path, "model_bundle_meta.json"), "r", encoding="utf-8") as f:
+        meta = json.load(f)
+
+    def _load(name):
+        p = os.path.join(path, name)
+        return joblib.load(p) if os.path.exists(p) else None
+
+    return ModelBundle(
+        win_model=_load("win_model.joblib"),
+        bt_place_given_win_model=_load("bt_place_given_win_model.joblib"),
+        bt_win_given_bt_place_model=_load("bt_win_given_bt_place_model.joblib"),
+        graded_given_bt_win_model=_load("graded_given_bt_win_model.joblib"),
+        positive_prize_model=_load("positive_prize_model.joblib"),
+        prize_model=_load("prize_model.joblib"),
+        prize_ge_10m_model=_load("prize_ge_10m_model.joblib"),
+        prize_ge_30m_model=_load("prize_ge_30m_model.joblib"),
+        q80_model=_load("q80_model.joblib"),
+        q90_model=_load("q90_model.joblib"),
+        ranking_model=_load("ranking_model.joblib") if meta.get("has_ranking_model", False) else None,
+        ceiling_weights=meta.get("ceiling_weights", {}),
+        feature_set=FeatureSet(**meta.get("feature_set", {})),
+    )

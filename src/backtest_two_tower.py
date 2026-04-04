@@ -12,34 +12,14 @@ import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 
-from .config import Config
-from .two_tower_config import TwoTowerConfig
-from .data import load_training_frame, load_completed_birth_years
-from .features import FeatureSet
-from .eval import evaluate_binary
-from .pipeline import train_all_models, predict_all, build_blended_scores, predict_ranking
-from .two_tower_pipeline import train_two_tower_models, predict_all as predict_all_two_tower, build_blended_scores as build_blended_scores_two_tower
-
-
-def auto_configure_splits(cfg):
-    completed_years = load_completed_birth_years(cfg)
-    if len(completed_years) < 5:
-        raise ValueError(f"已完成标签的 birth_year 太少：{completed_years}")
-    
-    cfg.test_birth_year_start = completed_years[-1]
-    cfg.test_birth_year_end = completed_years[-1]
-    cfg.valid_birth_year_start = completed_years[-2]
-    cfg.valid_birth_year_end = completed_years[-2]
-    cfg.train_birth_year_start = completed_years[0]
-    cfg.train_birth_year_end = completed_years[-3]
-    return cfg
-
-
-def split_by_birth_year(df, cfg):
-    train_df = df[(df["birth_year"] >= cfg.train_birth_year_start) & (df["birth_year"] <= cfg.train_birth_year_end)].copy()
-    valid_df = df[(df["birth_year"] >= cfg.valid_birth_year_start) & (df["birth_year"] <= cfg.valid_birth_year_end)].copy()
-    test_df = df[(df["birth_year"] >= cfg.test_birth_year_start) & (df["birth_year"] <= cfg.test_birth_year_end)].copy()
-    return train_df, valid_df, test_df
+from pog_model.config import Config
+from pog_model.two_tower_config import TwoTowerConfig
+from pog_model.data import load_training_frame, load_completed_birth_years
+from pog_model.features import FeatureSet
+from pog_model.eval import evaluate_binary
+from pog_model.pipeline import train_all_models, predict_all, build_blended_scores, predict_ranking
+from pog_model.two_tower_pipeline import train_two_tower_models, predict_all as predict_all_two_tower, build_blended_scores as build_blended_scores_two_tower
+from pog_model.split import auto_configure_splits, split_by_birth_year
 
 
 def build_topk_report(test_pred, score_cols, ks=[20, 50, 100]):

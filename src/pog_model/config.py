@@ -7,7 +7,7 @@ load_dotenv()
 
 @dataclass
 class Config:
-    db_url: str = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres@localhost:5432/jvlink")
+    db_url: str = os.getenv("DATABASE_URL", "postgresql+psycopg2://jvadmin:582d739e125f52749506015ff8e8186a3d4035a7@localhost:5432/jvlink")
     model_name: str = "pog_catboost_hurdle"
     model_version: str = "v0.1.0"
 

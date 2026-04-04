@@ -15,10 +15,10 @@ import shap
 from catboost import Pool
 from dotenv import load_dotenv
 
-from config import Config
-from features import prepare_matrix
-from pipeline import build_pool
-from score_cohorts import load_bundle, load_cohort_frame
+from pog_model.config import Config
+from pog_model.features import prepare_matrix
+from pog_model.pipeline import build_pool, load_bundle
+from pog_model.data import load_cohort_frame
 
 def map_weight_to_model_names(feat: str) -> list[str]:
     mapping = {

@@ -25,16 +25,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from config import Config
-from data import load_all_labeled_frame, load_completed_birth_years
-from features import FeatureSet
-from eval import evaluate_binary
-from pipeline import (
+from pog_model.config import Config
+from pog_model.data import load_all_labeled_frame, load_completed_birth_years
+from pog_model.features import FeatureSet
+from pog_model.eval import evaluate_binary
+from pog_model.pipeline import (
     train_binary_stage_model,
     predict_binary,
     subset_by_condition,
 )
-from backtest import generate_folds
+from pog_model.rolling_backtest import generate_folds
 
 
 # ==============================

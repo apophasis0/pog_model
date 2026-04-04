@@ -14,11 +14,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from config import Config
-from data import load_all_labeled_frame, load_completed_birth_years
-from features import FeatureSet
-from train import describe_split
-from pipeline import train_and_evaluate
+from pog_model.config import Config
+from pog_model.data import load_all_labeled_frame, load_completed_birth_years
+from pog_model.features import FeatureSet
+from pog_model.split import describe_split
+from pog_model.pipeline import train_and_evaluate
 
 
 # ==============================
