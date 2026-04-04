@@ -18,11 +18,11 @@ from catboost import CatBoostClassifier, CatBoostRegressor, CatBoostRanker, Pool
 from sklearn.linear_model import LinearRegression
 from sklearn.isotonic import IsotonicRegression
 
-from features import (
+from .features import (
     FeatureSet, prepare_matrix, add_log_target,
     fit_category_frequencies, apply_rare_filter,
 )
-from config import Config
+from .config import Config
 
 
 # =========================

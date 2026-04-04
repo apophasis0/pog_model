@@ -12,13 +12,13 @@ import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 
-from config import Config
-from two_tower_config import TwoTowerConfig
-from data import load_training_frame, load_completed_birth_years
-from features import FeatureSet
-from eval import evaluate_binary
-from pipeline import train_all_models, predict_all, build_blended_scores, predict_ranking
-from two_tower_pipeline import train_two_tower_models, predict_all as predict_all_two_tower, build_blended_scores as build_blended_scores_two_tower
+from .config import Config
+from .two_tower_config import TwoTowerConfig
+from .data import load_training_frame, load_completed_birth_years
+from .features import FeatureSet
+from .eval import evaluate_binary
+from .pipeline import train_all_models, predict_all, build_blended_scores, predict_ranking
+from .two_tower_pipeline import train_two_tower_models, predict_all as predict_all_two_tower, build_blended_scores as build_blended_scores_two_tower
 
 
 def auto_configure_splits(cfg):
