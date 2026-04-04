@@ -59,6 +59,8 @@ def train_binary_stage_model(
     auto_class_weights: str | None = "Balanced",
     ctr_leaf_count_limit: int | None = None,
     calibrate_probability: bool = True,
+    focal_alpha: float | None = None,
+    focal_gamma: float | None = None,
 ):
     """Train a binary classifier with optional isotonic probability calibration.
 
@@ -66,6 +68,14 @@ def train_binary_stage_model(
     to produce probabilities that deviate from true distributions. When
     chaining multiple models (e.g., P(bt_place) = P(win) * P(bt_place|win)),
     uncalibrated probabilities can compound errors exponentially.
+
+    Focal Loss support:
+        When both focal_alpha and focal_gamma are provided, the loss function
+        switches from Logloss to Focal Loss. This is useful for extremely
+        imbalanced targets where the model should focus on hard-to-classify
+        borderline examples rather than simply upweighting the minority class.
+        When Focal Loss is active, auto_class_weights is automatically
+        disabled (Focal Loss already incorporates class-aware focusing).
     """
     train_sub = subset_by_condition(train_df, condition_col)
     valid_sub = subset_by_condition(valid_df, condition_col)
@@ -85,19 +95,30 @@ def train_binary_stage_model(
     X_train, y_train, _, cat_cols = prepare_matrix(train_sub, feature_set=feature_set)
     X_valid, y_valid, _, _ = prepare_matrix(valid_sub, feature_set=feature_set)
 
+    # Determine loss function: Focal Loss or Logloss
+    use_focal = focal_alpha is not None and focal_gamma is not None
+    if use_focal:
+        loss_fn = f"Focal:focal_alpha={focal_alpha};focal_gamma={focal_gamma}"
+        effective_class_weights = None  # Focal Loss handles class imbalance internally
+        print(f"[{target}] Using Focal Loss: alpha={focal_alpha}, gamma={focal_gamma}")
+    else:
+        loss_fn = "Logloss"
+        effective_class_weights = auto_class_weights
+
     cb_kwargs: dict = dict(
-        loss_function="Logloss",
+        loss_function=loss_fn,
         eval_metric="AUC",
         iterations=iterations,
         learning_rate=learning_rate,
         depth=depth,
         l2_leaf_reg=l2_leaf_reg,
-        auto_class_weights=auto_class_weights,
         random_seed=42,
         verbose=100,
         od_type="Iter",
         od_wait=100,
     )
+    if effective_class_weights is not None:
+        cb_kwargs["auto_class_weights"] = effective_class_weights
     if ctr_leaf_count_limit is not None:
         cb_kwargs["ctr_leaf_count_limit"] = ctr_leaf_count_limit
 

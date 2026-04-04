@@ -58,6 +58,10 @@ class Config:
             "depth": 4, "l2_leaf_reg": 20.0, "learning_rate": 0.02, "iterations": 1500,
             "auto_class_weights": "Balanced",
             "ctr_leaf_count_limit": 4,
+            # Focal Loss: minority class is NEGATIVE (~7% of bt_win horses are non-graded)
+            # alpha < 0.5 upweights the rare negatives; gamma focuses on hard examples
+            "focal_alpha": 0.25,
+            "focal_gamma": 2.0,
         },
         "positive_prize": {
             "target": "positive_prize_flag",
