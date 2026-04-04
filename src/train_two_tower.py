@@ -182,7 +182,7 @@ def main():
     for col in pred_cols.columns:
         test_pred[col] = pred_cols[col].values
 
-    test_pred = build_blended_scores(test_pred, bundle)
+    test_pred = build_blended_scores(test_pred, bundle, full_df=test_df)
 
     # -------------------------
     # Metrics
@@ -326,7 +326,7 @@ def main():
     for col in current_pred_cols.columns:
         current_pred[col] = current_pred_cols[col].values
 
-    current_pred = build_blended_scores(current_pred, bundle)
+    current_pred = build_blended_scores(current_pred, bundle, full_df=score_df)
 
     current_pred["model_name"] = cfg.model_name
     current_pred["model_version"] = cfg.model_version

@@ -150,7 +150,7 @@ def main():
     for col in two_tower_pred_cols.columns:
         two_tower_pred[col] = two_tower_pred_cols[col].values
     
-    two_tower_pred = build_blended_scores_two_tower(two_tower_pred, two_tower_bundle)
+    two_tower_pred = build_blended_scores_two_tower(two_tower_pred, two_tower_bundle, full_df=test_df)
     
     # =========================
     # 指标对比

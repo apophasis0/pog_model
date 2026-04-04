@@ -414,10 +414,16 @@ def train_ranking_model(
 
 
 def predict_ranking(bundle: "TwoTowerBundle", df: pd.DataFrame) -> np.ndarray | None:
-    """使用 ranking model 生成排序分数。"""
+    """使用 ranking model 生成排序分数。
+    
+    Args:
+        bundle: 包含 ranking_model 和 feature_set 的模型包
+        df: 必须包含特征列的完整 DataFrame（不能只包含预测结果列）
+    """
     if bundle.ranking_model is None:
         return None
 
+    # 需要从原始特征生成预测
     meta = predict_all(bundle, df)
 
     ranking_features = [
@@ -426,6 +432,11 @@ def predict_ranking(bundle: "TwoTowerBundle", df: pd.DataFrame) -> np.ndarray | 
         "expected_pog_prize", "q90_prize",
     ]
     available_features = [f for f in ranking_features if f in meta.columns]
+    
+    if len(available_features) == 0:
+        print("[WARN] No ranking features available, skipping ranking prediction")
+        return None
+    
     X = meta[available_features]
 
     return bundle.ranking_model.predict(X)
@@ -587,12 +598,21 @@ def predict_all(bundle: TwoTowerBundle, df: pd.DataFrame) -> pd.DataFrame:
 def build_blended_scores(
     df: pd.DataFrame,
     bundle: TwoTowerBundle,
+    full_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """构建融合分数。"""
+    """构建融合分数。
+    
+    Args:
+        df: 包含预测结果的 DataFrame（可能是精简版，只有基础列）
+        bundle: 模型包
+        full_df: 完整的 DataFrame，包含特征列。用于 ranking 预测。
+                 如果为 None，则使用 df 进行预测（假设 df 包含特征列）。
+    """
     out = df.copy()
     
-    # Ranking scores
-    ranking_scores = predict_ranking(bundle, df)
+    # Ranking scores - 需要完整特征数据
+    ranking_df = full_df if full_df is not None else df
+    ranking_scores = predict_ranking(bundle, ranking_df)
     if ranking_scores is not None and len(ranking_scores) == len(out):
         out["score_ranking"] = ranking_scores
 
