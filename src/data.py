@@ -1,15 +1,26 @@
 import pandas as pd
 from sqlalchemy import create_engine, text
 from config import Config
+from typing import Protocol
+
+class HasDbUrl(Protocol):
+    """Protocol for config objects that have db_url attribute."""
+    db_url: str
+    train_birth_year_start: int
+    train_birth_year_end: int
+    test_birth_year_start: int
+    test_birth_year_end: int
+    target_birth_year: int
+    asof_date: any
 
 STATIC_FEATURE_VIEW = "pog.mv_static_features_v2"
 
 
-def get_engine(cfg: Config):
+def get_engine(cfg: HasDbUrl):
     return create_engine(cfg.db_url)
 
 
-def load_completed_birth_years(cfg: Config):
+def load_completed_birth_years(cfg: HasDbUrl):
     sql = text("""
     select distinct birth_year
     from pog.mv_horse_labels
@@ -22,7 +33,7 @@ def load_completed_birth_years(cfg: Config):
     return df["birth_year"].astype(int).tolist()
 
 
-def load_training_frame(cfg: Config) -> pd.DataFrame:
+def load_training_frame(cfg: HasDbUrl) -> pd.DataFrame:
     sql = text(f"""
     select
         f.*,
@@ -55,7 +66,7 @@ def load_training_frame(cfg: Config) -> pd.DataFrame:
     return df
 
 
-def load_all_labeled_frame(cfg: Config) -> pd.DataFrame:
+def load_all_labeled_frame(cfg: HasDbUrl) -> pd.DataFrame:
     """Load all label-complete JRA-registered horses (for rolling backtest)."""
     sql = text(f"""
     select
@@ -81,7 +92,7 @@ def load_all_labeled_frame(cfg: Config) -> pd.DataFrame:
     return df
 
 
-def load_scoring_frame(cfg: Config) -> pd.DataFrame:
+def load_scoring_frame(cfg: HasDbUrl) -> pd.DataFrame:
     sql = text(f"""
     select *
     from {STATIC_FEATURE_VIEW}
@@ -94,7 +105,7 @@ def load_scoring_frame(cfg: Config) -> pd.DataFrame:
     return df
 
 
-def load_dynamic_features(cfg: Config, birth_year: int) -> pd.DataFrame:
+def load_dynamic_features(cfg: HasDbUrl, birth_year: int) -> pd.DataFrame:
     sql = text("""
     select *
     from pog.fn_dynamic_features(:birth_year, :asof_date)
@@ -112,7 +123,7 @@ def load_dynamic_features(cfg: Config, birth_year: int) -> pd.DataFrame:
     return df
 
 
-def save_predictions(cfg: Config, pred_df: pd.DataFrame):
+def save_predictions(cfg: HasDbUrl, pred_df: pd.DataFrame):
     engine = get_engine(cfg)
     pred_df.to_sql(
         "model_predictions",
