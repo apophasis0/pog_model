@@ -278,7 +278,8 @@ select
     avg(hist.bt_place_flag::numeric) as sire_prior_bt_rate,
     avg(hist.graded_win_flag::numeric) as sire_prior_graded_win_rate,
     avg(ln(1 + hist.pog_total_prize::numeric)) as sire_prior_avg_log_prize,
-    percentile_cont(0.5) within group (order by hist.pog_total_prize) as sire_prior_med_prize
+    percentile_cont(0.5) within group (order by hist.pog_total_prize) as sire_prior_med_prize,
+    sum(hist.graded_win_flag)::numeric / nullif(sum(hist.win_flag), 0) as sire_prior_graded_per_win
 from pog.cohort_calendar target
 join hist_horse hist
   on hist.birth_year < target.birth_year
@@ -317,7 +318,8 @@ select
     avg(hist.bt_place_flag::numeric) as dam_prior_bt_rate,
     avg(hist.graded_win_flag::numeric) as dam_prior_graded_win_rate,
     avg(ln(1 + hist.pog_total_prize::numeric)) as dam_prior_avg_log_prize,
-    percentile_cont(0.5) within group (order by hist.pog_total_prize) as dam_prior_med_prize
+    percentile_cont(0.5) within group (order by hist.pog_total_prize) as dam_prior_med_prize,
+    sum(hist.graded_win_flag)::numeric / nullif(sum(hist.win_flag), 0) as dam_prior_graded_per_win
 from pog.cohort_calendar target
 join hist_horse hist
   on hist.birth_year < target.birth_year
@@ -631,7 +633,8 @@ select
     avg(hist.graded_win_flag::numeric) as damsire_prior_graded_win_rate,
     avg(ln(1 + hist.pog_total_prize::numeric)) as damsire_prior_avg_log_prize,
     percentile_cont(0.5) within group (order by hist.pog_total_prize) as damsire_prior_med_prize,
-    max(hist.pog_total_prize) as damsire_prior_best_prize
+    max(hist.pog_total_prize) as damsire_prior_best_prize,
+    sum(hist.graded_win_flag)::numeric / nullif(sum(hist.win_flag), 0) as damsire_prior_graded_per_win
 from pog.cohort_calendar target
 join hist_horse hist
   on hist.birth_year < target.birth_year
@@ -685,7 +688,8 @@ select
     avg(h.graded_win_flag::numeric) as prior_maternal_sib_graded_win_rate,
     avg(ln(1 + h.pog_total_prize::numeric)) as prior_maternal_sib_avg_log_prize,
     percentile_cont(0.5) within group (order by h.pog_total_prize) as prior_maternal_sib_med_prize,
-    max(h.pog_total_prize) as prior_maternal_sib_best_prize
+    max(h.pog_total_prize) as prior_maternal_sib_best_prize,
+    sum(h.graded_win_flag)::numeric / nullif(sum(h.win_flag), 0) as prior_maternal_sib_graded_per_win
 from target_horse t
 left join hist_horse h
   on t.dam_hansyoku_num = h.dam_hansyoku_num
@@ -779,7 +783,8 @@ select
     avg(hist.bt_win_flag::numeric) as nick_prior_bt_win_rate,
     avg(hist.graded_win_flag::numeric) as nick_prior_graded_win_rate,
     avg(ln(1 + hist.pog_total_prize::numeric)) as nick_prior_avg_log_prize,
-    max(hist.pog_total_prize) as nick_prior_best_prize
+    max(hist.pog_total_prize) as nick_prior_best_prize,
+    sum(hist.graded_win_flag)::numeric / nullif(sum(hist.win_flag), 0) as nick_prior_graded_per_win
 from pog.cohort_calendar target
 join hist_horse hist
   on hist.birth_year < target.birth_year
@@ -844,6 +849,49 @@ create index if not exists idx_mv_breeder_trainer_hist_stats_key
         chokyosi_code
     );
 
+drop materialized view if exists pog.mv_granddam_hist_stats;
+
+create materialized view pog.mv_granddam_hist_stats as
+with hist_horse as (
+    select
+        hm.ketto_num,
+        hm.birth_year,
+        hm.granddam_hansyoku_num,
+        hl.win_flag,
+        hl.bt_place_flag,
+        hl.bt_win_flag,
+        hl.graded_win_flag,
+        hl.pog_total_prize
+    from pog.mv_horse_master_ext hm
+    join pog.mv_horse_labels hl
+      on hm.ketto_num = hl.ketto_num
+    join pog.cohort_calendar cc
+      on hm.birth_year = cc.birth_year
+    where cc.label_complete = true
+      and hm.granddam_hansyoku_num is not null
+)
+select
+    target.birth_year as target_birth_year,
+    hist.granddam_hansyoku_num,
+    count(*) as granddam_prior_foals,
+    avg(hist.win_flag::numeric) as granddam_prior_win_rate,
+    avg(hist.bt_place_flag::numeric) as granddam_prior_bt_place_rate,
+    avg(hist.bt_win_flag::numeric) as granddam_prior_bt_win_rate,
+    avg(hist.graded_win_flag::numeric) as granddam_prior_graded_win_rate,
+    avg(ln(1 + hist.pog_total_prize::numeric)) as granddam_prior_avg_log_prize,
+    percentile_cont(0.5) within group (order by hist.pog_total_prize) as granddam_prior_med_prize,
+    max(hist.pog_total_prize) as granddam_prior_best_prize,
+    sum(hist.graded_win_flag)::numeric / nullif(sum(hist.win_flag), 0) as granddam_prior_graded_per_win
+from pog.cohort_calendar target
+join hist_horse hist
+  on hist.birth_year < target.birth_year
+group by
+    target.birth_year,
+    hist.granddam_hansyoku_num;
+
+create index if not exists idx_mv_granddam_hist_stats_key
+    on pog.mv_granddam_hist_stats (target_birth_year, granddam_hansyoku_num);
+
 drop materialized view if exists pog.mv_static_features_v2;
 
 create materialized view pog.mv_static_features_v2 as
@@ -883,6 +931,7 @@ select
     ss.sire_prior_graded_win_rate,
     ss.sire_prior_avg_log_prize,
     ss.sire_prior_med_prize,
+    ss.sire_prior_graded_per_win,
 
     ds.dam_prior_foals,
     ds.dam_prior_win_rate,
@@ -890,6 +939,7 @@ select
     ds.dam_prior_graded_win_rate,
     ds.dam_prior_avg_log_prize,
     ds.dam_prior_med_prize,
+    ds.dam_prior_graded_per_win,
 
     bs.breeder_prior_foals,
     bs.breeder_prior_win_rate,
@@ -914,6 +964,7 @@ select
     dss.damsire_prior_avg_log_prize,
     dss.damsire_prior_med_prize,
     dss.damsire_prior_best_prize,
+    dss.damsire_prior_graded_per_win,
 
     -- new sibling stats
     ms.prior_maternal_sib_count,
@@ -928,6 +979,7 @@ select
     ms.prior_maternal_sib_avg_log_prize,
     ms.prior_maternal_sib_med_prize,
     ms.prior_maternal_sib_best_prize,
+    ms.prior_maternal_sib_graded_per_win,
 
     fs.prior_full_sib_count,
     fs.prior_full_sib_win_rate,
@@ -946,6 +998,7 @@ select
     ns.nick_prior_graded_win_rate,
     ns.nick_prior_avg_log_prize,
     ns.nick_prior_best_prize,
+    ns.nick_prior_graded_per_win,
 
     -- combo stats
     bts.breeder_trainer_prior_foals,
@@ -954,7 +1007,18 @@ select
     bts.breeder_trainer_prior_bt_win_rate,
     bts.breeder_trainer_prior_graded_win_rate,
     bts.breeder_trainer_prior_avg_log_prize,
-    bts.breeder_trainer_prior_best_prize
+    bts.breeder_trainer_prior_best_prize,
+
+    -- granddam stats (bloodline depth)
+    gds.granddam_prior_foals,
+    gds.granddam_prior_win_rate,
+    gds.granddam_prior_bt_place_rate,
+    gds.granddam_prior_bt_win_rate,
+    gds.granddam_prior_graded_win_rate,
+    gds.granddam_prior_avg_log_prize,
+    gds.granddam_prior_med_prize,
+    gds.granddam_prior_best_prize,
+    gds.granddam_prior_graded_per_win
 
 from pog.mv_horse_master_ext hm
 left join pog.mv_sire_hist_stats ss
@@ -983,7 +1047,10 @@ left join pog.mv_sire_damsire_nick_stats ns
 left join pog.mv_breeder_trainer_hist_stats bts
   on hm.birth_year = bts.target_birth_year
  and hm.breeder_code = bts.breeder_code
- and hm.chokyosi_code = bts.chokyosi_code;
+ and hm.chokyosi_code = bts.chokyosi_code
+left join pog.mv_granddam_hist_stats gds
+  on hm.birth_year = gds.target_birth_year
+ and hm.granddam_hansyoku_num = gds.granddam_hansyoku_num;
 
 create unique index if not exists idx_mv_static_features_v2_ketto_num
     on pog.mv_static_features_v2 (ketto_num);

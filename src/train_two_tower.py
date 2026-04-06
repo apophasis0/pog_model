@@ -209,7 +209,8 @@ def main():
         if score_col not in test_pred.columns:
             continue
 
-        ranked = test_pred.sort_values(score_col, ascending=False).reset_index(drop=True)
+        ascending = score_col == "score_ranking"
+        ranked = test_pred.sort_values(score_col, ascending=ascending).reset_index(drop=True)
 
         for k in ks:
             top = ranked.head(k).copy()
@@ -279,7 +280,7 @@ def main():
 
     # 排序输出
     if "score_ranking" in current_pred.columns:
-        current_pred = current_pred.sort_values("score_ranking", ascending=False).reset_index(drop=True)
+        current_pred = current_pred.sort_values("score_ranking", ascending=True).reset_index(drop=True)
     elif "p_graded_win_direct" in current_pred.columns:
         current_pred = current_pred.sort_values("p_graded_win_direct", ascending=False).reset_index(drop=True)
     else:
@@ -309,7 +310,7 @@ def main():
     ]
 
     if "score_ranking" in current_pred.columns:
-        current_pred.sort_values("score_ranking", ascending=False).head(100)[shortlist_cols].to_csv(
+        current_pred.sort_values("score_ranking", ascending=True).head(100)[shortlist_cols].to_csv(
             "outputs/current_top100_two_tower_ranking.csv", index=False
         )
     current_pred.sort_values("p_graded_win_direct", ascending=False).head(100)[shortlist_cols].to_csv(

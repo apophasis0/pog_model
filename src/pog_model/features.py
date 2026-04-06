@@ -138,6 +138,26 @@ NEW_NUMERIC_BREEDER_TRAINER = [
     "breeder_trainer_prior_best_prize",
 ]
 
+NEW_NUMERIC_UPPER_LIMIT_RATES = [
+    "sire_prior_graded_per_win",
+    "dam_prior_graded_per_win",
+    "damsire_prior_graded_per_win",
+    "prior_maternal_sib_graded_per_win",
+    "nick_prior_graded_per_win",
+]
+
+NEW_NUMERIC_GRANDDAM_STATS = [
+    "granddam_prior_foals",
+    "granddam_prior_win_rate",
+    "granddam_prior_bt_place_rate",
+    "granddam_prior_bt_win_rate",
+    "granddam_prior_graded_win_rate",
+    "granddam_prior_avg_log_prize",
+    "granddam_prior_med_prize",
+    "granddam_prior_best_prize",
+    "granddam_prior_graded_per_win",
+]
+
 # Combined list (kept for backward compat references)
 NEW_NUMERIC_COLS = (
     NEW_NUMERIC_DAM_SIRE_AGE
@@ -146,6 +166,8 @@ NEW_NUMERIC_COLS = (
     + NEW_NUMERIC_FULL_SIB
     + NEW_NUMERIC_NICK_STATS
     + NEW_NUMERIC_BREEDER_TRAINER
+    + NEW_NUMERIC_UPPER_LIMIT_RATES
+    + NEW_NUMERIC_GRANDDAM_STATS
 )
 
 NUMERIC_COLS = BASE_NUMERIC_COLS + NEW_NUMERIC_COLS
@@ -168,6 +190,8 @@ class FeatureSet:
     new_numeric_full_sib: bool = True
     new_numeric_nick_stats: bool = True
     new_numeric_breeder_trainer: bool = True
+    new_numeric_upper_limit_rates: bool = True
+    new_numeric_granddam_stats: bool = True
 
     def get_categorical_cols(self) -> list[str]:
         cols: list[str] = []
@@ -193,6 +217,10 @@ class FeatureSet:
             cols += NEW_NUMERIC_NICK_STATS
         if self.new_numeric_breeder_trainer:
             cols += NEW_NUMERIC_BREEDER_TRAINER
+        if self.new_numeric_upper_limit_rates:
+            cols += NEW_NUMERIC_UPPER_LIMIT_RATES
+        if self.new_numeric_granddam_stats:
+            cols += NEW_NUMERIC_GRANDDAM_STATS
         return cols
 
     def describe(self) -> str:
